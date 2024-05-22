@@ -8,6 +8,8 @@ services:
       - ./templates:/app/templates
       - ./data:/data
       - certs:/certs
+      - ./challenge:/challenge/:ro 
+      - ./challenge_cache:/challenge_cache/:ro 
     environment:
       FLASK_APP: "app.py"
       FLASK_DEBUG: 1
@@ -17,7 +19,8 @@ services:
     image: docker:dind
     privileged: true
     volumes:
-      - ./challenge:/challenge/:ro  # Read-only volume for Dockerfiles
+      - ./challenge:/challenge/:ro 
+      - ./challenge_cache:/challenge_cache/:ro
       - certs:/certs
 volumes:
   certs:
