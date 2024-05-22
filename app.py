@@ -198,7 +198,7 @@ def build_and_measure(dockerfile_content, id):
             path="/challenge",
             dockerfile=dockerfile_content,
             tag=tag,
-            #nocache=True
+            nocache=True
         )
         end_time = time.time()
         build_time_no_cache = end_time - start_time
