@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <!-- Required meta tags -->
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <title>Basic Form</title>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Submit Data</h1>
+      <form action="/submit" method="post" enctype="multipart/form-data">
+        <div class="form-group">
+          <label for="data">Data:</label>
+          <input type="file" id="data" name="dockerfile" class="form-control" required>
+        </div>
+        <button type="submit" class="btn btn-primary">Submit</button>
+      </form>
+    </div>
+  </body>
+</html>
