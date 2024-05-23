@@ -5,7 +5,14 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
     <title>Docker Challenge</title>
+    <script src="https://unpkg.com/dropzone@5/dist/min/dropzone.min.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/dropzone@5/dist/min/dropzone.min.css" type="text/css" />
     <style>
+        #myDropzone.dropzone {
+            border-radius: 4px;
+            min-height: 100px;
+        }
+
         .message {
             opacity: 0;
             transition: opacity 1s ease-in-out;
@@ -39,39 +46,44 @@
 
 <body>
     <div class="container">
-        <h1>Submit Data</h1>
-        <form action="/submit" method="post" enctype="multipart/form-data">
-            <div class="form-group">
-                <label for="data">Data:</label>
-                <input type="file" id="data" name="dockerfile" class="form-control" required>
-            </div>
-            <input type="submit" value="Submit" class="btn btn-primary">
-        </form>
+        <h1>Submit Data {{ user_id }}</h1>
+        <div id="myDropzone" class="dropzone">
+        </div>
         <ul id="messages"></ul>
     </div>
 
     <script>
-        document.getElementById('data').addEventListener('change', async function () {
-            const file = this.files[0];
-            if (!file) {
-                return;
-            }
-            const formData = new FormData();
-            formData.append('dockerfile', file);
-            try {
-                const response = await fetch('/submit', {
-                    method: 'POST',
-                    body: formData
-                });
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                const data = await response.json();
-                console.log(data);
-            } catch (error) {
-                console.error('Error:', error);
-            }
+        Dropzone.autoDiscover = false;
+        dropzone = new Dropzone("#myDropzone", {
+            url: "/submit",
+            maxFiles: 1,
+            paramName: "dockerfile",
+            dictDefaultMessage:
+                "Drop files here to upload, click to browse or CTRL + V to past from clipboard.",
         });
+        dropzone.on("complete", function(file) {
+            dropzone.removeFile(file);
+        });
+        dropzone.on("success", function (file, response) {
+            console.log(response);
+        });
+        document.onpaste = function (event) {
+            // TODO block if upload blocked
+            const items = (event.clipboardData || event.originalEvent.clipboardData)
+                .items;
+            items.forEach((item) => {
+                if (item.kind === "file") {
+                    dropzone.addFile(item.getAsFile());
+                }
+                else if(item.kind === "string") {
+                    item.getAsString(function (s) {
+                        const blob = new Blob([s], { type: 'text/plain' });
+                        const file = new File([blob], 'Dockerfile', { type: 'text/plain' });
+                        dropzone.addFile(file);
+                    });
+                }
+            });
+        };
 
         // Server-Sent Event connection
         const eventSource = new EventSource('/data');

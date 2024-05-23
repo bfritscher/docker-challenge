@@ -1,6 +1,6 @@
-- query scores by user_id
-- frontend
-- integrate auth
+- frontend css
+- frontend state based on auth
+- display run results & errors
 
-- replace same user in build queue
+- admin access dockerfile
 - gunicorn?

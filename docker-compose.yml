@@ -14,7 +14,8 @@ services:
       FLASK_APP: "app.py"
       FLASK_DEBUG: 1
       DOCKER_TLS_CERTDIR: /certs
-
+    env_file:
+      - .env
   dind:
     image: docker:dind
     privileged: true
