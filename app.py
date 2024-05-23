@@ -6,11 +6,14 @@ urllib3.disable_warnings()
 
 from flask import Flask, request, jsonify, render_template, current_app, Response, stream_with_context
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import func
 import time
 import requests
 import json
 import queue
 from threading import Thread, Lock,  Condition
+from datetime import datetime
+
 
 
 app = Flask(__name__)
@@ -37,6 +40,7 @@ class BuildResult(db.Model):
     is_valid = db.Column(db.Boolean, nullable=False, default=False)
     dockerfile_content = db.Column(db.Text, nullable=False)
     error = db.Column(db.Text, nullable=True)
+    # TODO updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     def __repr__(self):
         return f"<BuildResult {self.id}>"
@@ -272,6 +276,96 @@ def validate_container(id, image):
         container.remove(v=True, force=True)
         return is_valid, error
 
+
+# Baseline values
+baseline_min_image_size = 0
+baseline_max_image_size = 1000 * 1024 * 1024
+baseline_min_build_time_no_cache = 0
+baseline_max_build_time_no_cache = 1200
+baseline_min_build_time_with_cache = 0
+baseline_max_build_time_with_cache = 1200
+
+# Weights
+weight_image_size = 0.7
+weight_build_time_with_cache = 0.2
+weight_build_time_no_cache = 0.1
+
+@app.route('/scores', methods=['GET'])
+def get_scores():
+    # max score for a user
+    score_subquery = db.session.query(
+        BuildResult.id,
+        BuildResult.user_id,
+        (
+            weight_image_size * (
+                1 - (BuildResult.image_size - baseline_min_image_size) /
+                     (baseline_max_image_size - baseline_min_image_size)
+            ) +
+            weight_build_time_with_cache * (
+                1 - (BuildResult.build_time_with_cache - baseline_min_build_time_with_cache) /
+                     (baseline_max_build_time_with_cache - baseline_min_build_time_with_cache)
+            ) +
+            weight_build_time_no_cache * (
+                1 - (BuildResult.build_time_no_cache - baseline_min_build_time_no_cache) /
+                     (baseline_max_build_time_no_cache - baseline_min_build_time_no_cache)
+            )
+        ).label('score'),
+    ).filter(
+        BuildResult.build_time_with_cache.isnot(None),
+        BuildResult.image_size.isnot(None),
+        BuildResult.build_time_no_cache.isnot(None),
+        BuildResult.build_status == "completed",
+        BuildResult.is_valid == True
+    ).subquery()
+
+    # Subquery to find the maximum score per user_id
+    max_score_subquery = db.session.query(
+        score_subquery.c.user_id,
+        func.max(score_subquery.c.score).label('max_score')
+    ).group_by(score_subquery.c.user_id).subquery()
+    
+    # Subquery to count total attempts including failed ones
+    total_attempts_subquery = db.session.query(
+        BuildResult.user_id,
+        func.count(BuildResult.id).label('total_attempts')
+    ).group_by(BuildResult.user_id).subquery()
+
+
+  # Join subqueries to get details with the highest score per user_id and total attempts
+    best_results = db.session.query(
+        BuildResult,
+        score_subquery.c.score,
+        total_attempts_subquery.c.total_attempts
+    ).join(
+        score_subquery, score_subquery.c.id == BuildResult.id
+    ).join(
+        total_attempts_subquery, BuildResult.user_id == total_attempts_subquery.c.user_id
+    ).join(
+        max_score_subquery,
+        (BuildResult.user_id == max_score_subquery.c.user_id) &
+        (score_subquery.c.score == max_score_subquery.c.max_score)
+    ).order_by(
+        score_subquery.c.score.desc()
+    ).all()
+
+    scores = []
+    for record, score, total_attempts in best_results:
+        scores.append({
+            'id': record.id,
+            'user_id': record.user_id,
+            'build_status': record.build_status,
+            'build_time_no_cache': record.build_time_no_cache,
+            'build_time_with_cache': record.build_time_with_cache,
+            'image_size': record.image_size,
+            'is_valid': record.is_valid,
+            'dockerfile_content': record.dockerfile_content,
+            'error': record.error,
+            # 'updated_at': record.updated_at,
+            'score': score,
+            'total_attempts': total_attempts
+        })
+
+    return jsonify(scores)
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0")
