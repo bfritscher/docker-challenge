@@ -535,7 +535,7 @@ def get_scores():
                 "build_time_no_cache": round(build_time_no_cache, 1),
                 "build_time_with_cache": round(build_time_with_cache, 1),
                 "image_size": size_to_mb(image_size),
-                'updated_at': updated_at,
+                'updated_at': updated_at.isoformat(),
                 "score": round(score * 1000),
                 "total_attempts": total_attempts,
             }
