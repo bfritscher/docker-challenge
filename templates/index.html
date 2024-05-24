@@ -4,13 +4,74 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
-    <title>Docker Challenge</title>
-    <script src="https://unpkg.com/dropzone@5/dist/min/dropzone.min.js"></script>
+    <title>docker challenge</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@300..700&display=swap" rel="stylesheet">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Roboto:ital,wght@0,100;0,300;0,400;0,500;0,700;0,900;1,100;1,300;1,400;1,500;1,700;1,900&display=swap"
+        rel="stylesheet">
     <link rel="stylesheet" href="https://unpkg.com/dropzone@5/dist/min/dropzone.min.css" type="text/css" />
+    <link href="https://unpkg.com/tabulator-tables@6.2.1/dist/css/tabulator_materialize.min.css" rel="stylesheet">
+    <script type="text/javascript" src="https://unpkg.com/dropzone@5/dist/min/dropzone.min.js"></script>
+    <script type="text/javascript" src="https://unpkg.com/tabulator-tables@6.2.1/dist/js/tabulator.min.js"></script>
+    <script type="text/javascript" src="https://unpkg.com/luxon@3.4.4/build/global/luxon.min.js"></script>
     <style>
+        :root {
+            --primary-color: #1D63ED;
+            --secondary-color: #E5F2FC;
+            --accent-color: #00084D;
+            --success-color: #28a745;
+            --info-color: #17a2b8;
+            --warning-color: #ffc107;
+            --danger-color: #dc3545;
+        }
+
+        body {
+            font-family: 'Comfortaa', sans-serif;
+            font-optical-sizing: auto;
+            font-style: normal;
+            margin: 0;
+            padding: 0;
+            background-color: #f9f9f9;
+        }
+
+        a {
+            color: var(--primary-color);
+            text-decoration: none;
+        }
+
+        a:hover {
+            color: var(--accent-color);
+            text-decoration: underline;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        h1 {
+            font-weight: 700;
+            color: var(--primary-color);
+            margin: 0;
+        }
+
+        header {
+            margin-bottom: 2em;
+        }
+
         #myDropzone.dropzone {
             border-radius: 4px;
-            min-height: 100px;
+            min-height: 50px;
+            border-color: var(--accent-color);
+            background-color: var(--secondary-color);
+            margin-bottom: 2em;
+        }
+
+        .dropzone .dz-message {
+            margin: 0;
         }
 
         .message {
@@ -35,24 +96,131 @@
             background-color: #f9f9f9;
         }
 
-        .header {
+        #messages .header {
             font-weight: bold;
             margin-top: 20px;
             margin-bottom: 10px;
             font-size: 1.2em;
+            border-color: var(--accent-color);
+            background-color: var(--secondary-color);
+        }
+
+        .row {
+            display: flex;
+            align-items: center;
+        }
+
+        .spacer {
+            flex-grow: 1;
+        }
+
+        .only-auth {
+            display: none;
+        }
+
+        body.auth .only-auth {
+            display: block;
+        }
+
+        #dataContent {
+            padding: 12px;
+            overflow: auto;
+        }
+
+        #dataContent table {
+            border-collapse: collapse;
+            width: 100%;
+
+        }
+
+        #dataContent th,
+        #dataContent td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            font-size: 12pt;
+        }
+
+        #dataContent td:first-child {
+            vertical-align: top;
+        }
+
+        #dataContent th {
+            background-color: #f2f2f2;
+            text-align: left;
+        }
+
+        dialog {
+            width: 70%;
+            border: 1px solid #ddd;
+            padding: 0;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+            flex-direction: column;
+        }
+
+        dialog header {
+            background-color: var(--primary-color);
+            font-weight: 700;
+            color: white;
+            padding: 10px;
+            display: flex;
+            margin: 0;
+            justify-content: space-between;
+        }
+
+        #closeDialog {
+            background-color: transparent;
+            border: none;
+            color: white;
+            font-size: 1em;
+            cursor: pointer;
+        }
+        .tabulator-row.tabulator-selected {
+            background-color: var(--secondary-color);
         }
     </style>
 </head>
 
 <body>
     <div class="container">
-        <h1>Submit Data {{ user_id }}</h1>
-        <div id="myDropzone" class="dropzone">
-        </div>
+        <header class="row">
+            <h1>docker challenge</h1>
+            <div class="spacer"></div>
+            <div id="topRight">
+
+            </div>
+        </header>
         <ul id="messages"></ul>
+        <div id="myDropzone" class="dropzone only-auth">
+        </div>
+        <div id="scores"></div>
     </div>
+    <dialog id="dataDialog">
+        <header>
+            <div id="dataTitle"></div>
+            <button id="closeDialog">Close</button>
+        </header>
+        <div id="dataContent"></div>
+    </dialog>
 
     <script>
+
+        // flask included variable
+        const auth = {{ user_id }};
+
+        const topRight = document.getElementById('topRight');
+        if (auth) {
+            const logout = document.createElement('a');
+            logout.href = '/logout';
+            logout.textContent = 'Logout';
+            topRight.appendChild(logout);
+            document.body.classList.add('auth');
+        } else {
+            const login = document.createElement('a');
+            login.href = `https://marmix.ig.he-arc.ch/shibjwt/?reply_to=${window.location.protocol}//${window.location.host}/login`;
+            login.textContent = 'Login';
+            topRight.appendChild(login);
+        }
+
         Dropzone.autoDiscover = false;
         dropzone = new Dropzone("#myDropzone", {
             url: "/submit",
@@ -61,7 +229,7 @@
             dictDefaultMessage:
                 "Drop files here to upload, click to browse or CTRL + V to past from clipboard.",
         });
-        dropzone.on("complete", function(file) {
+        dropzone.on("complete", function (file) {
             dropzone.removeFile(file);
         });
         dropzone.on("success", function (file, response) {
@@ -75,7 +243,7 @@
                 if (item.kind === "file") {
                     dropzone.addFile(item.getAsFile());
                 }
-                else if(item.kind === "string") {
+                else if (item.kind === "string") {
                     item.getAsString(function (s) {
                         const blob = new Blob([s], { type: 'text/plain' });
                         const file = new File([blob], 'Dockerfile', { type: 'text/plain' });
@@ -96,8 +264,11 @@
             }
         };
 
+        const messageList = document.getElementById('messages');
+
         function displayMessage(data) {
             const messageList = document.getElementById('messages');
+            // TODO if completed table.setData(); to refresh scores
 
             // Check if the id has changed
             if (data.id !== lastId) {
@@ -108,7 +279,7 @@
                 lastId = data.id;
                 const header = document.createElement('li');
                 header.classList.add('header');
-                header.textContent = `Header: ${data.id}`;
+                header.textContent = `Build: #${data.id}`;
                 messageList.appendChild(header);
             }
 
@@ -123,6 +294,106 @@
             setTimeout(() => {
                 newMessage.classList.add('show');
             }, 10);  // Small delay to trigger the animation
+        }
+
+        const table = new Tabulator("#scores", {
+            //height: 205, // set height of table (in CSS or here), this enables the Virtual DOM and improves render speed dramatically (can be any valid css height value)
+            layout: "fitColumns", //fit columns to width of table (optional)
+            ajaxURL: "/scores",
+            initialSort: [
+                { column: "score", dir: "desc" },
+            ],
+            columns: [ //Define Table Columns
+                /*
+                    "build_time_no_cache": 48.0,
+        "build_time_with_cache": 2.9,
+        "firstname": "Boris",
+        "id": 2,
+        "image_size": "63.97 MB",
+        "score": 951,
+        "total_attempts": 2,
+        "updated_at": "2024-05-23T20:08:35.784970",
+        "user_id": 
+        */
+                { title: "User", field: "firstname" },
+                { title: "Score", field: "score", hozAlign: "right" },
+                { title: "Size", field: "image_size", hozAlign: "right" },
+                { title: "Build Time", field: "build_time_no_cache", hozAlign: "right" },
+                { title: "Build Time (cache)", field: "build_time_with_cache", hozAlign: "right" },
+                { title: "Attempts", field: "total_attempts", hozAlign: "right", sorter: "date" },
+                {
+                    title: "Updated At", field: "updated_at", hozAlign: "right", formatter: "datetime", formatterParams: {
+                        inputFormat: "iso",
+                        outputFormat: "dd.MM.yyyy HH:ss",
+                        invalidPlaceholder: "(invalid date)",
+                        timezone: "Europe/Zurich",
+                    },
+                    sorter: "datetime", sorterParams: {
+                        format: "iso",
+                    },
+                },
+            ],
+            rowFormatter: function (row) {
+                const data = row.getData(); //get data object for row
+
+                if (auth && data.user_id == auth) {
+                    row.getElement().classList.add("tabulator-selected");
+                }
+            },
+        });
+        table.on("rowClick", function (e, row) {
+            getBuild(row.getData().id);
+        });
+        const dialog = document.getElementById('dataDialog')
+        // Handle clicking on the backdrop to close
+        dialog.addEventListener('click', (event) => {
+            const rect = dialog.getBoundingClientRect();
+
+            // Check if the click is outside the dialog content
+            if (event.clientX < rect.left || event.clientX > rect.right ||
+                event.clientY < rect.top || event.clientY > rect.bottom) {
+                dialog.close();
+                dialog.style.display = 'none';
+            }
+        });
+        document.getElementById('closeDialog').addEventListener('click', () => {
+            document.getElementById('dataDialog').close();
+            dialog.style.display = 'none';
+        });
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+                dialog.style.display = 'none';
+            }
+        });
+
+        function getBuild(id) {
+            fetch(`/build/${id}`)
+                .then(response => response.json())
+                .then(data => {
+                    console.log(data);
+                    const dataContent = `
+                <table>
+                    <tr><th>Attribute</th><th>Value</th></tr>
+                    <tr><td>Build Status</td><td>${data.build_status}</td></tr>
+                    <tr><td>Image Size</td><td>${data.image_size}</td></tr>
+                    <tr><td>Build Time (No Cache)</td><td>${data.build_time_no_cache} seconds</td></tr>
+                    <tr><td>Build Time (With Cache)</td><td>${data.build_time_with_cache} seconds</td></tr>
+                    <tr><td>Is Valid</td><td>${data.is_valid}</td></tr>
+                    <tr><td>Error</td><td><pre>${data.error === null ? 'None' : data.error}</pre></td></tr>
+                    <tr><td>Dockerfile Content</td><td><pre>${data.dockerfile_content}</pre></td></tr>
+                    <tr><td>First Name</td><td>${data.firstname}</td></tr>
+                    <tr><td>Last Name</td><td>${data.lastname}</td></tr>
+                    <tr><td>Email</td><td>${data.email}</td></tr>
+                    <tr><td>User ID</td><td>${data.user_id}</td></tr>
+                    <tr><td>Updated At</td><td>${data.updated_at}</td></tr>
+                </table>
+            `;
+
+                    document.getElementById('dataContent').innerHTML = dataContent;
+                    document.getElementById('dataTitle').textContent = `Build ${id}`;
+                    dialog.showModal();
+                    dialog.style.display = 'flex';
+                });
         }
     </script>
 </body>

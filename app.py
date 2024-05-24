@@ -28,13 +28,13 @@ from sqlalchemy import func
 import time
 import requests
 import json
-import queue
-from threading import Thread, Lock, Condition
+from threading import Thread, Condition
 from datetime import datetime
 import os
 
 JWT_SECRET = os.getenv("JWT_SECRET")
 SESSION_SECRET = os.getenv("SESSION_SECRET")
+ADMIN_EMAILS = os.getenv("ADMIN_EMAILS", "").split(",")
 
 app = Flask(__name__)
 app.secret_key = SESSION_SECRET
@@ -78,7 +78,8 @@ class User(db.Model):
 
 with app.app_context():
     db.create_all()
-
+    ADMIN_IDS = [User.query.filter_by(email=email).first().id for email in ADMIN_EMAILS]
+    app.logger.info(f"Admin IDs: {ADMIN_IDS}")
 
 def authentication_required():
     response = jsonify({"error": "Authentication required"})
@@ -191,7 +192,7 @@ Thread(target=process_build_queue, daemon=True).start()
 
 @app.route("/")
 def index():
-    return render_template("index.html", user_id=session.get('user_id'))
+    return render_template("index.html", user_id=session.get('user_id') or "undefined")
 
 
 @app.route("/logout")
@@ -244,6 +245,33 @@ def prune():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/build/<int:id>")
+@login_required
+def get_build(id):
+    build_result = BuildResult.query.get(id)
+    if build_result is None:
+        return jsonify({"error": "Build not found"}), 404
+
+    response = {
+            "id": build_result.id,
+            "user_id": build_result.user_id,
+            "build_status": build_result.build_status,
+            "build_time_no_cache": round(build_result.build_time_no_cache, 1),
+            "build_time_with_cache": round(build_result.build_time_with_cache, 1),
+            "image_size": size_to_mb(build_result.image_size),
+            "is_valid": build_result.is_valid,
+            "error": build_result.error,
+            "updated_at": build_result.updated_at.isoformat(),
+        }
+    if  build_result.user_id == session['user_id'] or session['user_id'] in ADMIN_IDS:
+        response["dockerfile_content"] = build_result.dockerfile_content
+        response["firstname"] = build_result.user.firstname
+        response["lastname"] = build_result.user.lastname
+        response["email"] = build_result.user.email
+    return jsonify(
+        response
+    )
+
 @app.route("/submit", methods=["POST"])
 @login_required
 def submit_dockerfile():
@@ -267,6 +295,7 @@ def submit_dockerfile():
     db.session.add(build_result)
     db.session.commit()
     # Queue the build
+    current_app.logger.info(f"Build {build_result.id} queued")
     build_queue.put(
         {
             "user_id": session['user_id'],
@@ -274,8 +303,7 @@ def submit_dockerfile():
             "id": build_result.id,
         }
     )
-    current_app.logger.info(f"Build {build_result.id} queued")
-    build_queue.send_message({"message": "Build queued", "id": build_result.id})
+    
 
     return (
         jsonify({"id": build_result.id}),

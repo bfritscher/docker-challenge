@@ -1,6 +1,8 @@
-- frontend css
-- frontend state based on auth
-- display run results & errors
+- testing generate user data 
+- display queue && my position
+- get user last run & errors
+- display run results
+- refresh scores
 
-- admin access dockerfile
+- deploy
 - gunicorn?
