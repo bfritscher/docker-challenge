@@ -36,6 +36,10 @@ JWT_SECRET = os.getenv("JWT_SECRET")
 SESSION_SECRET = os.getenv("SESSION_SECRET")
 ADMIN_EMAILS = os.getenv("ADMIN_EMAILS", "").split(",")
 
+BUILD_STATUS_QUEUED = "queued"
+BUILD_STATUS_COMPLETED = "completed"
+BUILD_STATUS_CANCELED = "canceled"
+
 app = Flask(__name__)
 app.secret_key = SESSION_SECRET
 tls_config = docker.tls.TLSConfig(
@@ -51,21 +55,36 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db = SQLAlchemy(app)
 
 
+def get_queue_order_message(queue):
+    return {"queue": [item["id"] for item in queue]}
+
+
+def buildresult_to_queue_item(build_result):
+    return {
+        "user_id": build_result.user_id,
+        "dockerfile_content": build_result.dockerfile_content,
+        "id": build_result.id,
+    }
+
+
 class BuildResult(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     user = db.relationship("User", lazy="joined")  # Relationship
-    build_status = db.Column(db.String(64), nullable=False, default="queued")
+    build_status = db.Column(db.String(64), nullable=False, default=BUILD_STATUS_QUEUED)
     build_time_no_cache = db.Column(db.Float, nullable=True)
     build_time_with_cache = db.Column(db.Float, nullable=True)
     image_size = db.Column(db.Integer, nullable=True)
     is_valid = db.Column(db.Boolean, nullable=False, default=False)
     dockerfile_content = db.Column(db.Text, nullable=False)
     error = db.Column(db.Text, nullable=True)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = db.Column(
+        db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
 
     def __repr__(self):
         return f"<BuildResult {self.id}>"
+
 
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -74,36 +93,6 @@ class User(db.Model):
     email = db.Column(db.String(120), unique=True, nullable=False)
     affiliation = db.Column(db.String(120), nullable=True)
     uniqueID = db.Column(db.String(50), unique=True, nullable=False)
-
-
-with app.app_context():
-    db.create_all()
-    ADMIN_IDS = [User.query.filter_by(email=email).first().id for email in ADMIN_EMAILS]
-    app.logger.info(f"Admin IDs: {ADMIN_IDS}")
-
-def authentication_required():
-    response = jsonify({"error": "Authentication required"})
-    response.status_code = 401  # Unauthorized
-    return response
-
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if 'user_id' not in session:
-            return authentication_required()
-        return f(*args, **kwargs)
-    return decorated_function
-
-def cancel_item(id):
-    with app.app_context():
-        build_result = BuildResult.query.get(id)
-        build_result.build_status = "canceled"
-        db.session.commit()
-        current_app.logger.info(f"Build {id} canceled")
-
-
-def get_queue_order_message(queue):
-    return {"queue": [item["id"] for item in queue]}
 
 
 class Queue:
@@ -115,7 +104,7 @@ class Queue:
         # used to store messages to be sent to the client on new connection
         self.messages = []
 
-    def find_item_by_user_id(self, user_id):
+    def find_item_index_by_user_id(self, user_id):
         for i, item in enumerate(self.queue):
             if item["user_id"] == user_id:
                 return i
@@ -123,7 +112,7 @@ class Queue:
 
     def put(self, item):
         with self.condition:
-            index = self.find_item_by_user_id(item["user_id"])
+            index = self.find_item_index_by_user_id(item["user_id"])
             if index >= 0:
                 previous_item = self.queue[index]
                 cancel_item(previous_item["id"])
@@ -153,8 +142,44 @@ class Queue:
             self.condition.notify_all()
 
 
-# Queuing system for Docker builds
-build_queue = Queue()
+with app.app_context():
+    db.create_all()
+    ADMIN_IDS = [User.query.filter_by(email=email).first().id for email in ADMIN_EMAILS]
+    app.logger.info(f"Admin IDs: {ADMIN_IDS}")
+    # Queuing system for Docker builds
+    build_queue = Queue()
+    # initialize queue from db get all BuildResults with status queued order by updated_at
+    queued_builds = (
+        BuildResult.query.filter_by(build_status=BUILD_STATUS_QUEUED)
+        .order_by(BuildResult.updated_at)
+        .all()
+    )
+    build_queue.queue = [buildresult_to_queue_item(build) for build in queued_builds]
+    app.logger.info(f"Initialized queue with {len(build_queue.queue)} items")
+
+
+def authentication_required():
+    response = jsonify({"error": "Authentication required"})
+    response.status_code = 401  # Unauthorized
+    return response
+
+
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if "user_id" not in session:
+            return authentication_required()
+        return f(*args, **kwargs)
+
+    return decorated_function
+
+
+def cancel_item(id):
+    with app.app_context():
+        build_result = BuildResult.query.get(id)
+        build_result.build_status = BUILD_STATUS_CANCELED
+        db.session.commit()
+        current_app.logger.info(f"Build {id} canceled")
 
 
 def process_build_queue():
@@ -176,7 +201,7 @@ def process_build_queue():
             build_result.build_time_with_cache = build_time_with_cache
             build_result.image_size = image_size
             build_result.is_valid = is_valid
-            build_result.build_status = "completed"
+            build_result.build_status = BUILD_STATUS_COMPLETED
             build_result.error = error
             db.session.commit()
             current_app.logger.info(f"Build {build_data['id']} completed")
@@ -186,18 +211,41 @@ def process_build_queue():
             )
 
 
-# Start a thread to process the build queue
-Thread(target=process_build_queue, daemon=True).start()
-
-
 @app.route("/")
 def index():
-    return render_template("index.html", user_id=session.get('user_id') or "undefined")
+    user_id = session.get("user_id")
+    queued_item_id = None
+    last_build = None
+    if user_id:
+        last_build = (
+            BuildResult.query.filter_by(
+                user_id=user_id, build_status=BUILD_STATUS_COMPLETED
+            )
+            .order_by(BuildResult.updated_at.desc())
+            .first()
+        )
+        index = build_queue.find_item_index_by_user_id(user_id)
+        if index >= 0:
+            queued_item_id = build_queue.queue[index]["id"]
+        if last_build:
+            last_build = {
+                "id": last_build.id,
+                "is_valid": last_build.is_valid,
+                "updated_at": last_build.updated_at.isoformat(),
+            }
+
+    return render_template(
+        "index.html",
+        user_id=user_id,
+        last_build=last_build,
+        queue=[item["id"] for item in build_queue.queue],
+        queued_item_id=queued_item_id,
+    )
 
 
 @app.route("/logout")
 def logout():
-    session.pop('user_id', None)
+    session.pop("user_id", None)
     return redirect("/")
 
 
@@ -206,25 +254,25 @@ def login_handle():
     jwt_token = request.values.get("jwt")
     app.logger.info(f"Received JWT token: {jwt_token}")
     try:
-        payload = jwt.decode(jwt_token, JWT_SECRET, algorithms=['HS256'], leeway=10)
+        payload = jwt.decode(jwt_token, JWT_SECRET, algorithms=["HS256"], leeway=10)
     except jwt.InvalidTokenError:
         return "Invalid token", 400
 
-    email = payload.get('email')
+    email = payload.get("email")
     user = User.query.filter_by(email=email).first()
     if user is None:
         user = User(
-            firstname=payload.get('firstname'),
-            lastname=payload.get('lastname'),
+            firstname=payload.get("firstname"),
+            lastname=payload.get("lastname"),
             email=email,
-            affiliation=payload.get('affiliation'),
-            uniqueID=payload.get('uniqueID')
+            affiliation=payload.get("affiliation"),
+            uniqueID=payload.get("uniqueID"),
         )
         db.session.add(user)
         db.session.commit()
 
     app.logger.info(f"User {payload} logged in")
-    session['user_id'] = user.id
+    session["user_id"] = user.id
 
     return redirect("/")
 
@@ -253,24 +301,23 @@ def get_build(id):
         return jsonify({"error": "Build not found"}), 404
 
     response = {
-            "id": build_result.id,
-            "user_id": build_result.user_id,
-            "build_status": build_result.build_status,
-            "build_time_no_cache": round(build_result.build_time_no_cache, 1),
-            "build_time_with_cache": round(build_result.build_time_with_cache, 1),
-            "image_size": size_to_mb(build_result.image_size),
-            "is_valid": build_result.is_valid,
-            "error": build_result.error,
-            "updated_at": build_result.updated_at.isoformat(),
-        }
-    if  build_result.user_id == session['user_id'] or session['user_id'] in ADMIN_IDS:
+        "id": build_result.id,
+        "user_id": build_result.user_id,
+        "build_status": build_result.build_status,
+        "build_time_no_cache": round(build_result.build_time_no_cache, 1),
+        "build_time_with_cache": round(build_result.build_time_with_cache, 1),
+        "image_size": size_to_mb(build_result.image_size),
+        "is_valid": build_result.is_valid,
+        "error": build_result.error,
+        "updated_at": build_result.updated_at.isoformat(),
+    }
+    if build_result.user_id == session["user_id"] or session["user_id"] in ADMIN_IDS:
         response["dockerfile_content"] = build_result.dockerfile_content
         response["firstname"] = build_result.user.firstname
         response["lastname"] = build_result.user.lastname
         response["email"] = build_result.user.email
-    return jsonify(
-        response
-    )
+    return jsonify(response)
+
 
 @app.route("/submit", methods=["POST"])
 @login_required
@@ -284,7 +331,7 @@ def submit_dockerfile():
 
     # Save initial build data to the database
     build_result = BuildResult(
-        user_id=session['user_id'],
+        user_id=session["user_id"],
         build_status="queued",
         build_time_no_cache=None,
         build_time_with_cache=None,
@@ -296,14 +343,7 @@ def submit_dockerfile():
     db.session.commit()
     # Queue the build
     current_app.logger.info(f"Build {build_result.id} queued")
-    build_queue.put(
-        {
-            "user_id": session['user_id'],
-            "dockerfile_content": dockerfile_content,
-            "id": build_result.id,
-        }
-    )
-    
+    build_queue.put(buildresult_to_queue_item(build_result))
 
     return (
         jsonify({"id": build_result.id}),
@@ -489,7 +529,7 @@ def get_scores():
             BuildResult.build_time_with_cache.isnot(None),
             BuildResult.image_size.isnot(None),
             BuildResult.build_time_no_cache.isnot(None),
-            BuildResult.build_status == "completed",
+            BuildResult.build_status == BUILD_STATUS_COMPLETED,
             BuildResult.is_valid == True,
         )
         .subquery()
@@ -563,7 +603,7 @@ def get_scores():
                 "build_time_no_cache": round(build_time_no_cache, 1),
                 "build_time_with_cache": round(build_time_with_cache, 1),
                 "image_size": size_to_mb(image_size),
-                'updated_at': updated_at.isoformat(),
+                "updated_at": updated_at.isoformat(),
                 "score": round(score * 1000),
                 "total_attempts": total_attempts,
             }
@@ -571,6 +611,9 @@ def get_scores():
 
     return jsonify(scores)
 
+
+# Start a thread to process the build queue
+Thread(target=process_build_queue, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0")

@@ -174,6 +174,7 @@
             font-size: 1em;
             cursor: pointer;
         }
+
         .tabulator-row.tabulator-selected {
             background-color: var(--secondary-color);
         }
@@ -204,8 +205,11 @@
 
     <script>
 
-        // flask included variable
-        const auth = {{ user_id }};
+        // flask included variables
+        const auth = {{ user_id| tojson }};
+        let userLastBuild = {{ last_build| tojson }};
+        let queue = {{ queue| tojson }};
+        let userCurrentQueueItemId = {{ queued_item_id| tojson }};
 
         const topRight = document.getElementById('topRight');
         if (auth) {
@@ -303,6 +307,7 @@
             initialSort: [
                 { column: "score", dir: "desc" },
             ],
+            responsiveLayout: "collapse",
             columns: [ //Define Table Columns
                 /*
                     "build_time_no_cache": 48.0,
@@ -315,14 +320,15 @@
         "updated_at": "2024-05-23T20:08:35.784970",
         "user_id": 
         */
-                { title: "User", field: "firstname" },
-                { title: "Score", field: "score", hozAlign: "right" },
-                { title: "Size", field: "image_size", hozAlign: "right" },
-                { title: "Build Time", field: "build_time_no_cache", hozAlign: "right" },
-                { title: "Build Time (cache)", field: "build_time_with_cache", hozAlign: "right" },
-                { title: "Attempts", field: "total_attempts", hozAlign: "right", sorter: "date" },
+                { formatter: "rownum", hozAlign: "right", width: 40 },
+                { title: "User", field: "firstname", width: 160, widthShrink: 1 },
+                { title: "Score", field: "score", hozAlign: "right", headerHozAlign: "right", width: 100 },
+                { title: "Size", field: "image_size", hozAlign: "right", headerHozAlign: "right" },
+                { title: "BT", field: "build_time_no_cache", hozAlign: "right", headerHozAlign: "right", width: 80 },
+                { title: "BTc", field: "build_time_with_cache", hozAlign: "right", headerHozAlign: "right", width: 80 },
+                { title: "Attempts", field: "total_attempts", hozAlign: "right", headerHozAlign: "right" },
                 {
-                    title: "Updated At", field: "updated_at", hozAlign: "right", formatter: "datetime", formatterParams: {
+                    title: "Updated At", field: "updated_at", hozAlign: "right", headerHozAlign: "right", formatter: "datetime", formatterParams: {
                         inputFormat: "iso",
                         outputFormat: "dd.MM.yyyy HH:ss",
                         invalidPlaceholder: "(invalid date)",
@@ -331,6 +337,8 @@
                     sorter: "datetime", sorterParams: {
                         format: "iso",
                     },
+                    width: 180,
+                    widthShrink: 0
                 },
             ],
             rowFormatter: function (row) {
