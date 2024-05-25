@@ -24,13 +24,14 @@ from flask import (
     stream_with_context,
 )
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import func
+from sqlalchemy import func, desc, asc
 from sqlalchemy.ext.hybrid import hybrid_property
+from sqlalchemy.sql.expression import over
 import time
 import requests
 import json
 from threading import Thread, Condition
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 
 JWT_SECRET = os.getenv("JWT_SECRET")
@@ -99,6 +100,8 @@ class BuildResult(db.Model):
 
     @hybrid_property
     def score(self):
+        if self.build_time_no_cache is None or self.build_time_with_cache is None or self.image_size is None:
+            return None
         return (
                 weight_image_size
                 * (
@@ -174,9 +177,9 @@ class Queue:
             else:
                 self.queue.append(item)
             self.message = get_queue_order_message(self.queue)
+            self.condition.notify_all()
             with self.lock:
                 self.lock.notify()
-            self.condition.notify_all()
 
     def get(self):
         with self.lock:
@@ -191,6 +194,7 @@ class Queue:
 
     def send_message(self, message):
         with self.condition:
+            message["updated_at"] = datetime.now(timezone.utc).isoformat()
             self.message = message
             self.messages.append(message)
             self.condition.notify_all()
@@ -259,10 +263,14 @@ def process_build_queue():
             build_result.error = error
             db.session.commit()
             current_app.logger.info(f"Build {build_data['id']} completed")
-            # TODO full data?
-            build_queue.send_message(
-                {"message": "Build completed", "id": build_data["id"]}
-            )
+            build_queue.send_message({
+                "message": "Build completed",
+                 "id": build_data["id"],
+                 "is_valid": is_valid,
+                 "score": round(build_result.score * 1000) if build_result.score else None,
+                 "updated_at": build_result.updated_at.isoformat(),
+                 "user_id": build_result.user_id,
+            })
 
 
 @app.route("/")
@@ -369,6 +377,8 @@ def get_build(id):
         "image_size": size_to_mb(build_result.image_size) if build_result.image_size else None,
         "is_valid": build_result.is_valid,
         "error": build_result.error,
+        "score": round(build_result.score * 1000) if build_result.score else None,
+        "score_raw": build_result.score,
         "updated_at": build_result.updated_at.isoformat(),
     }
     if build_result.user_id == session["user_id"] or session["user_id"] in ADMIN_IDS:
@@ -600,6 +610,7 @@ def get_scores():
             BuildResult.score,
             BuildResult.score_rounded,
             total_attempts_subquery.c.total_attempts,
+            func.row_number().over(order_by=(desc(BuildResult.score), asc(BuildResult.updated_at))).label('rank')
         )
         .join(User, User.id == BuildResult.user_id)
         .join(score_subquery, score_subquery.c.id == BuildResult.id)
@@ -612,7 +623,7 @@ def get_scores():
             (BuildResult.user_id == max_score_subquery.c.user_id)
             & (score_subquery.c.id == max_score_subquery.c.best_result_id),
         )
-        .order_by(BuildResult.score.desc())
+        .order_by(BuildResult.score.desc(), BuildResult.updated_at.asc())
         .all()
     )
 
@@ -628,6 +639,7 @@ def get_scores():
         score,
         score_rounded,
         total_attempts,
+        rank
     ) in best_results:
         scores.append(
             {
@@ -641,6 +653,7 @@ def get_scores():
                 "score_raw": score,
                 "score": score_rounded,
                 "total_attempts": total_attempts,
+                "rank": rank
             }
         )
 

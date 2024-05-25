@@ -8,9 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@300..700&display=swap" rel="stylesheet">
-    <link
-        href="https://fonts.googleapis.com/css2?family=Roboto:ital,wght@0,100;0,300;0,400;0,500;0,700;0,900;1,100;1,300;1,400;1,500;1,700;1,900&display=swap"
-        rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Source+Code+Pro:ital,wght@0,200..900;1,200..900&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://unpkg.com/dropzone@5/dist/min/dropzone.min.css" type="text/css" />
     <link href="https://unpkg.com/tabulator-tables@6.2.1/dist/css/tabulator_materialize.min.css" rel="stylesheet">
     <script type="text/javascript" src="https://unpkg.com/dropzone@5/dist/min/dropzone.min.js"></script>
@@ -82,13 +80,25 @@
         .message.show {
             opacity: 1;
         }
+        .message span {
+            padding: 4px 8px;
+            border-radius: 5px;
+            margin-left: 10px;
+            color: white;
+        }
+        .message span.valid {
+            background-color: var(--success-color) !important;
+        }
+        .message span.invalid {
+            background-color: var(--danger-color) !important;
+        }
 
         #messages {
             list-style-type: none;
             padding: 0;
         }
 
-        #messages li {
+        #messages > div {
             margin: 10px 0;
             padding: 10px;
             border: 1px solid #ccc;
@@ -178,6 +188,31 @@
         .tabulator-row.tabulator-selected {
             background-color: var(--secondary-color);
         }
+
+        #lastRun {
+            color: white;
+            border: none;
+            padding: 10px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-right: 20px;
+            background-color: var(--danger-color);
+        }
+
+        #lastRun.valid {
+            background-color: var(--success-color);
+        }
+
+        #lastRun:hover {
+            background-color: var(--primary-color);
+        }
+        .monospace {
+            font-family: "Source Code Pro", monospace;
+            font-size: 10pt;
+        }
+        .text-bold {
+            font-weight: bold;
+        }
     </style>
 </head>
 
@@ -186,13 +221,13 @@
         <header class="row">
             <h1>docker challenge</h1>
             <div class="spacer"></div>
-            <div id="topRight">
-
-            </div>
+            <div id="queue"></div>
+            <div class="spacer"></div>
+            <button id="lastRun" class="valid">Your last run #45: 456</button>
+            <div id="topRight"></div>
         </header>
-        <ul id="messages"></ul>
-        <div id="myDropzone" class="dropzone only-auth">
-        </div>
+        <div id="messages"></div>
+        <div id="myDropzone" class="dropzone only-auth"></div>
         <div id="scores"></div>
     </div>
     <dialog id="dataDialog">
@@ -224,6 +259,47 @@
             login.textContent = 'Login';
             topRight.appendChild(login);
         }
+        const lastRun = document.getElementById('lastRun');
+        lastRun.addEventListener('click', () => {
+            getBuild(userLastBuild.id);
+        });
+        function updateLastRun() {
+            if (userLastBuild) {
+                lastRun.style.display = 'block';
+                if (userLastBuild.is_valid) {
+                    lastRun.textContent = `Your last run #${userLastBuild.id}: ${userLastBuild.score}`;
+                } else {
+                    lastRun.textContent = `Your last run #${userLastBuild.id}: failed`;
+                }
+                lastRun.classList.toggle('valid', userLastBuild.is_valid);
+            } else {
+                lastRun.style.display = 'none';
+            }
+        }
+        updateLastRun();
+
+        const queueElement = document.getElementById('queue');
+        function updateQueue() {
+            if (queue.length > 0) {
+                queueElement.innerHTML = `Queue: ${queue.length}`;
+                if (userCurrentQueueItemId) {
+                    queueElement.innerHTML = `Build     #${userCurrentQueueItemId} queued at ${queue.indexOf(userCurrentQueueItemId) + 1}/${queue.length}`;
+                }
+            } else {
+                queueElement.innerHTML = '';
+            }
+        }
+        updateQueue();
+
+        function updateScores() {
+            return fetch('/scores')
+                .then(response => response.json())
+                .then(data => {
+                    table.setData(data);
+                    return data;
+                });
+        }
+        updateScores();
 
         Dropzone.autoDiscover = false;
         dropzone = new Dropzone("#myDropzone", {
@@ -238,6 +314,10 @@
         });
         dropzone.on("success", function (file, response) {
             console.log(response);
+            if (response.id) {
+                userCurrentQueueItemId = response.id;
+                updateQueue();
+            }
         });
         document.onpaste = function (event) {
             // TODO block if upload blocked
@@ -265,12 +345,15 @@
             const data = JSON.parse(event.data);
             if (data.message) {  // Ensure the message attribute is present
                 displayMessage(data);
+            } else if(data.queue) {
+                queue = data.queue;
+                updateQueue();
             }
         };
 
         const messageList = document.getElementById('messages');
 
-        function displayMessage(data) {
+        async function displayMessage(data) {
             const messageList = document.getElementById('messages');
             // TODO if completed table.setData(); to refresh scores
 
@@ -281,15 +364,41 @@
 
                 // Update lastId and add a new header
                 lastId = data.id;
-                const header = document.createElement('li');
+                const header = document.createElement('div');
                 header.classList.add('header');
-                header.textContent = `Build: #${data.id}`;
+                header.classList.add('row');
+
+                header.innerHTML = `<div>Build #${data.id}</div><div class="spacer"></div><div class="monospace">${luxon.DateTime.fromISO(data.updated_at).toFormat('dd.MM.yyyy')}</div>`;
                 messageList.appendChild(header);
             }
 
-            const newMessage = document.createElement('li');
+            const newMessage = document.createElement('div');
             newMessage.classList.add('message');
-            newMessage.textContent = data.message;
+            newMessage.classList.add('row');
+
+            if (data.hasOwnProperty('is_valid')) {
+                newMessage.classList.add('text-bold');
+                newMessage.classList.add(data.is_valid ? 'valid' : 'invalid');
+                if (data.score) {
+                    data.message += `<span class="valid">score: ${data.score}</span>`;
+                } else {
+                    data.message += `<span class="invalid">failed</span>`;
+                }
+                const scores = await updateScores();
+                const item = scores.find((result) => result.id === data.id);
+                if (item) {
+                    data.message += ` ranks at #${item.rank}`;
+                }
+                if (userCurrentQueueItemId === data.id) {
+                    userCurrentQueueItemId = null;
+                    updateQueue();
+                }
+                if (data.user_id === auth) {
+                    userLastBuild = data;
+                    updateLastRun();
+                }
+            }
+            newMessage.innerHTML = `<div>${data.message}</div><div class="spacer"></div><div class="monospace">${luxon.DateTime.fromISO(data.updated_at).toFormat('HH:mm:ss')}</div>`;
 
             // Prepend the new message
             messageList.insertBefore(newMessage, messageList.firstChild.nextSibling);
@@ -303,9 +412,9 @@
         const table = new Tabulator("#scores", {
             //height: 205, // set height of table (in CSS or here), this enables the Virtual DOM and improves render speed dramatically (can be any valid css height value)
             layout: "fitColumns", //fit columns to width of table (optional)
-            ajaxURL: "/scores",
+            //ajaxURL: "/scores",
             initialSort: [
-                { column: "score", dir: "desc" },
+                { column: "rank", dir: "asc" },
             ],
             responsiveLayout: "collapse",
             columns: [ //Define Table Columns
@@ -320,7 +429,8 @@
         "updated_at": "2024-05-23T20:08:35.784970",
         "user_id": 
         */
-                { formatter: "rownum", hozAlign: "right", width: 40 },
+                //{ formatter: "rownum", hozAlign: "right", width: 40 },
+                { field: "rank", hozAlign: "right", headerHozAlign: "right", width: 40 },
                 { title: "User", field: "firstname", width: 160, widthShrink: 1 },
                 { title: "Score", field: "score", hozAlign: "right", headerHozAlign: "right", width: 100 },
                 { title: "Size", field: "image_size", hozAlign: "right", headerHozAlign: "right" },
@@ -387,7 +497,9 @@
                     <tr><td>Build Time (No Cache)</td><td>${data.build_time_no_cache} seconds</td></tr>
                     <tr><td>Build Time (With Cache)</td><td>${data.build_time_with_cache} seconds</td></tr>
                     <tr><td>Is Valid</td><td>${data.is_valid}</td></tr>
-                    <tr><td>Error</td><td><pre>${data.error === null ? 'None' : data.error}</pre></td></tr>
+                    <tr><td>Score</td><td>${data.score}</td></tr>
+                    <tr><td>Score raw</td><td>${data.score_raw}</td></tr>
+                    <tr><td>Error</td><td><pre>${data.error === null ? 'None' : decodeURIComponent(data.error)}</pre></td></tr>
                     <tr><td>Dockerfile Content</td><td><pre>${data.dockerfile_content}</pre></td></tr>
                     <tr><td>First Name</td><td>${data.firstname}</td></tr>
                     <tr><td>Last Name</td><td>${data.lastname}</td></tr>

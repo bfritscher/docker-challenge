@@ -4,15 +4,12 @@ services:
     ports:
       - "5000:5000"
     volumes:
-      - ./app.py:/app/app.py
-      - ./templates:/app/templates
       - ./data:/data
       - certs:/certs
       - ./challenge:/challenge/:ro 
       - ./challenge_cache:/challenge_cache/:ro 
     environment:
-      FLASK_APP: "app.py"
-      FLASK_DEBUG: 1
+      FLASK_DEBUG: 0
       DOCKER_TLS_CERTDIR: /certs
     env_file:
       - .env
