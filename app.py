@@ -25,6 +25,7 @@ from flask import (
 )
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import func
+from sqlalchemy.ext.hybrid import hybrid_property
 import time
 import requests
 import json
@@ -67,6 +68,20 @@ def buildresult_to_queue_item(build_result):
     }
 
 
+
+# Baseline values
+baseline_min_image_size = 0
+baseline_max_image_size = 1000 * 1024 * 1024
+baseline_min_build_time_no_cache = 0
+baseline_max_build_time_no_cache = 1200
+baseline_min_build_time_with_cache = 0
+baseline_max_build_time_with_cache = 1200
+
+# Weights
+weight_image_size = 0.7
+weight_build_time_with_cache = 0.2
+weight_build_time_no_cache = 0.1
+
 class BuildResult(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
@@ -81,6 +96,45 @@ class BuildResult(db.Model):
     updated_at = db.Column(
         db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )
+
+    @hybrid_property
+    def score(self):
+        return (
+                weight_image_size
+                * (
+                    1
+                    - (self.image_size - baseline_min_image_size)
+                    / (baseline_max_image_size - baseline_min_image_size)
+                )
+                + weight_build_time_with_cache
+                * (
+                    1
+                    - (
+                        self.build_time_with_cache
+                        - baseline_min_build_time_with_cache
+                    )
+                    / (
+                        baseline_max_build_time_with_cache
+                        - baseline_min_build_time_with_cache
+                    )
+                )
+                + weight_build_time_no_cache
+                * (
+                    1
+                    - (
+                        self.build_time_no_cache
+                        - baseline_min_build_time_no_cache
+                    )
+                    / (
+                        baseline_max_build_time_no_cache
+                        - baseline_min_build_time_no_cache
+                    )
+                )
+            )
+    
+    @hybrid_property
+    def score_rounded(self):
+        return func.round(self.score * 1000, 0)
 
     def __repr__(self):
         return f"<BuildResult {self.id}>"
@@ -218,7 +272,12 @@ def index():
     last_build = None
     if user_id:
         last_build = (
-            BuildResult.query.filter_by(
+            db.session.query(
+                BuildResult.id,
+                BuildResult.is_valid,
+                BuildResult.score_rounded,
+                BuildResult.updated_at,
+            ).filter_by(
                 user_id=user_id, build_status=BUILD_STATUS_COMPLETED
             )
             .order_by(BuildResult.updated_at.desc())
@@ -231,6 +290,7 @@ def index():
             last_build = {
                 "id": last_build.id,
                 "is_valid": last_build.is_valid,
+                "score": last_build.score_rounded,
                 "updated_at": last_build.updated_at.isoformat(),
             }
 
@@ -304,9 +364,9 @@ def get_build(id):
         "id": build_result.id,
         "user_id": build_result.user_id,
         "build_status": build_result.build_status,
-        "build_time_no_cache": round(build_result.build_time_no_cache, 1),
-        "build_time_with_cache": round(build_result.build_time_with_cache, 1),
-        "image_size": size_to_mb(build_result.image_size),
+        "build_time_no_cache": round(build_result.build_time_no_cache, 1) if build_result.build_time_no_cache else None,
+        "build_time_with_cache": round(build_result.build_time_with_cache, 1) if build_result.build_time_with_cache else None,
+        "image_size": size_to_mb(build_result.image_size) if build_result.image_size else None,
         "is_valid": build_result.is_valid,
         "error": build_result.error,
         "updated_at": build_result.updated_at.isoformat(),
@@ -439,6 +499,7 @@ def validate_container(id, image):
     is_valid = False
     error = None
     tag = f"build-{id}"
+    container = None
     try:
         current_app.logger.info(f"Starting container with tag {tag}")
         build_queue.send_message({"message": f"Starting container", "id": id})
@@ -467,63 +528,18 @@ def validate_container(id, image):
         error = "Error starting container"
     finally:
         time.sleep(1)
-        container.remove(v=True, force=True)
+        if container:
+            container.remove(v=True, force=True)
         return is_valid, error
-
-
-# Baseline values
-baseline_min_image_size = 0
-baseline_max_image_size = 1000 * 1024 * 1024
-baseline_min_build_time_no_cache = 0
-baseline_max_build_time_no_cache = 1200
-baseline_min_build_time_with_cache = 0
-baseline_max_build_time_with_cache = 1200
-
-# Weights
-weight_image_size = 0.7
-weight_build_time_with_cache = 0.2
-weight_build_time_no_cache = 0.1
 
 
 @app.route("/scores", methods=["GET"])
 def get_scores():
-    # max score for a user
     score_subquery = (
         db.session.query(
             BuildResult.id,
             BuildResult.user_id,
-            (
-                weight_image_size
-                * (
-                    1
-                    - (BuildResult.image_size - baseline_min_image_size)
-                    / (baseline_max_image_size - baseline_min_image_size)
-                )
-                + weight_build_time_with_cache
-                * (
-                    1
-                    - (
-                        BuildResult.build_time_with_cache
-                        - baseline_min_build_time_with_cache
-                    )
-                    / (
-                        baseline_max_build_time_with_cache
-                        - baseline_min_build_time_with_cache
-                    )
-                )
-                + weight_build_time_no_cache
-                * (
-                    1
-                    - (
-                        BuildResult.build_time_no_cache
-                        - baseline_min_build_time_no_cache
-                    )
-                    / (
-                        baseline_max_build_time_no_cache
-                        - baseline_min_build_time_no_cache
-                    )
-                )
-            ).label("score"),
+            BuildResult.score,
         )
         .filter(
             BuildResult.build_time_with_cache.isnot(None),
@@ -535,13 +551,28 @@ def get_scores():
         .subquery()
     )
 
-    # Subquery to find the maximum score per user_id
-    max_score_subquery = (
+    # Subquery to find the maximum score per user_id with ranking
+    rank_subquery = (
         db.session.query(
             score_subquery.c.user_id,
-            func.max(score_subquery.c.score).label("max_score"),
+            score_subquery.c.id,
+            score_subquery.c.score.label("score"),
+            func.row_number().over(
+                partition_by=score_subquery.c.user_id,
+                order_by=score_subquery.c.score.desc()
+            ).label('rank')
         )
-        .group_by(score_subquery.c.user_id)
+        .subquery()
+    )
+
+     # Subquery to find the maximum score per user_id with ranking
+    max_score_subquery = (
+        db.session.query(
+            rank_subquery.c.user_id,
+            rank_subquery.c.id.label("best_result_id"),
+            rank_subquery.c.score
+        )
+        .filter(rank_subquery.c.rank == 1)
         .subquery()
     )
 
@@ -550,6 +581,7 @@ def get_scores():
         db.session.query(
             BuildResult.user_id, func.count(BuildResult.id).label("total_attempts")
         )
+        .filter(BuildResult.build_status == BUILD_STATUS_COMPLETED)
         .group_by(BuildResult.user_id)
         .subquery()
     )
@@ -565,7 +597,8 @@ def get_scores():
             BuildResult.build_time_with_cache,
             BuildResult.image_size,
             BuildResult.updated_at,
-            score_subquery.c.score,
+            BuildResult.score,
+            BuildResult.score_rounded,
             total_attempts_subquery.c.total_attempts,
         )
         .join(User, User.id == BuildResult.user_id)
@@ -577,9 +610,9 @@ def get_scores():
         .join(
             max_score_subquery,
             (BuildResult.user_id == max_score_subquery.c.user_id)
-            & (score_subquery.c.score == max_score_subquery.c.max_score),
+            & (score_subquery.c.id == max_score_subquery.c.best_result_id),
         )
-        .order_by(score_subquery.c.score.desc())
+        .order_by(BuildResult.score.desc())
         .all()
     )
 
@@ -593,6 +626,7 @@ def get_scores():
         image_size,
         updated_at,
         score,
+        score_rounded,
         total_attempts,
     ) in best_results:
         scores.append(
@@ -604,7 +638,8 @@ def get_scores():
                 "build_time_with_cache": round(build_time_with_cache, 1),
                 "image_size": size_to_mb(image_size),
                 "updated_at": updated_at.isoformat(),
-                "score": round(score * 1000),
+                "score_raw": score,
+                "score": score_rounded,
                 "total_attempts": total_attempts,
             }
         )
