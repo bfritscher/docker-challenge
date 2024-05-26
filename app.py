@@ -22,6 +22,7 @@ from flask import (
     current_app,
     Response,
     stream_with_context,
+    url_for,
 )
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import func, desc, asc
@@ -33,6 +34,9 @@ import json
 from threading import Thread, Condition
 from datetime import datetime, timezone
 import os
+from flask_admin import Admin
+from flask_admin.contrib.sqla import ModelView
+from markupsafe import Markup
 
 JWT_SECRET = os.getenv("JWT_SECRET")
 SESSION_SECRET = os.getenv("SESSION_SECRET")
@@ -50,6 +54,9 @@ tls_config = docker.tls.TLSConfig(
     verify=False,
 )
 client = docker.DockerClient(base_url="tcp://dind:2376", tls=tls_config)
+
+app.config['FLASK_ADMIN_SWATCH'] = 'yeti'
+admin = Admin(app, template_mode='bootstrap4')
 
 # Configure Database URI: Adjust as needed
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:////data/results.db"
@@ -86,7 +93,7 @@ weight_build_time_no_cache = 0.1
 class BuildResult(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
-    user = db.relationship("User", lazy="joined")  # Relationship
+    user = db.relationship("User", lazy="joined", backref="build_results")  # Relationship
     build_status = db.Column(db.String(64), nullable=False, default=BUILD_STATUS_QUEUED)
     build_time_no_cache = db.Column(db.Float, nullable=True)
     build_time_with_cache = db.Column(db.Float, nullable=True)
@@ -150,6 +157,45 @@ class User(db.Model):
     email = db.Column(db.String(120), unique=True, nullable=False)
     affiliation = db.Column(db.String(120), nullable=True)
     uniqueID = db.Column(db.String(50), unique=True, nullable=False)
+
+    def __repr__(self):
+        return f"<User {self.firstname} {self.lastname}>"
+
+# config admin
+class SecureModelView(ModelView):
+    def is_accessible(self):
+        return session.get("user_id") in ADMIN_IDS
+
+    # Redirect users who do not have access
+    def inaccessible_callback(self, name, **kwargs):
+        return redirect(url_for('index', next=request.url))
+
+class UserAdmin(SecureModelView):
+    column_list = ['id', 'firstname', 'lastname', 'email', 'affiliation', 'uniqueID']
+
+class BuildResultAdmin(SecureModelView):
+    column_list = [
+        'id', 'user', 'build_status', 'build_time_no_cache', 
+        'build_time_with_cache', 'image_size', 'is_valid', 
+        'updated_at', 'score'
+    ]
+    form_columns = [
+        'user', 'build_status', 'build_time_no_cache', 'build_time_with_cache', 
+        'image_size', 'is_valid', 'dockerfile_content', 'error'
+    ]
+
+    # Link Formatter
+    def user_link_formatter(view, context, model, name):
+        if model.user is None:
+            return ''
+        return Markup(f'<a href="{url_for("user.edit_view", id=model.user.id)}">{model.user.firstname} {model.user.lastname}</a>')
+
+    column_formatters = {
+        'user': user_link_formatter
+    }
+
+admin.add_view(UserAdmin(User, db.session))
+admin.add_view(BuildResultAdmin(BuildResult, db.session))
 
 
 class Queue:
