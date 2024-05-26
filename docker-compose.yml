@@ -1,8 +1,6 @@
 services:
   web:
     build: .
-    ports:
-      - "5000:5000"
     volumes:
       - ./data:/data
       - certs:/certs
