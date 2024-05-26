@@ -72,11 +72,11 @@ def buildresult_to_queue_item(build_result):
 
 # Baseline values
 baseline_min_image_size = 0
-baseline_max_image_size = 1000 * 1024 * 1024
+baseline_max_image_size = 800 * 1024 * 1024
 baseline_min_build_time_no_cache = 0
-baseline_max_build_time_no_cache = 1200
+baseline_max_build_time_no_cache = 60
 baseline_min_build_time_with_cache = 0
-baseline_max_build_time_with_cache = 1200
+baseline_max_build_time_with_cache = 140
 
 # Weights
 weight_image_size = 0.7
