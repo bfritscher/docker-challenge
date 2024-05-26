@@ -202,7 +202,7 @@ class Queue:
 
 with app.app_context():
     db.create_all()
-    ADMIN_IDS = [User.query.filter_by(email=email).first().id for email in ADMIN_EMAILS]
+    ADMIN_IDS = [user.id for user in [User.query.filter_by(email=email).first() for email in ADMIN_EMAILS] if user]
     app.logger.info(f"Admin IDs: {ADMIN_IDS}")
     # Queuing system for Docker builds
     build_queue = Queue()
