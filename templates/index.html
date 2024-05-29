@@ -11,6 +11,9 @@
     <link href="https://fonts.googleapis.com/css2?family=Source+Code+Pro:ital,wght@0,200..900;1,200..900&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://unpkg.com/dropzone@5/dist/min/dropzone.min.css" type="text/css" />
     <link href="https://unpkg.com/tabulator-tables@6.2.1/dist/css/tabulator_materialize.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://unpkg.com/@highlightjs/cdn-assets@11.9.0/styles/github.min.css">
+    <script src="https://unpkg.com/@highlightjs/cdn-assets@11.9.0/highlight.min.js"></script>
+    <script src="https://unpkg.com/@highlightjs/cdn-assets@11.9.0/languages/dockerfile.min.js"></script>
     <script type="text/javascript" src="https://unpkg.com/dropzone@5/dist/min/dropzone.min.js"></script>
     <script type="text/javascript" src="https://unpkg.com/tabulator-tables@6.2.1/dist/js/tabulator.min.js"></script>
     <script type="text/javascript" src="https://unpkg.com/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -58,6 +61,14 @@
 
         header {
             margin-bottom: 2em;
+        }
+
+        pre {
+            margin: 0;
+        }
+
+        pre code.hljs {
+            padding: 0;
         }
 
         #myDropzone.dropzone {
@@ -313,7 +324,6 @@
             dropzone.removeFile(file);
         });
         dropzone.on("success", function (file, response) {
-            console.log(response);
             if (response.id) {
                 userCurrentQueueItemId = response.id;
                 updateQueue();
@@ -495,7 +505,6 @@
             fetch(`/build/${id}`)
                 .then(response => response.json())
                 .then(data => {
-                    console.log(data);
                     const dataContent = `
                 <table>
                     <tr><th>Attribute</th><th>Value</th></tr>
@@ -507,7 +516,7 @@
                     <tr><td>Score</td><td>${data.score}</td></tr>
                     <tr><td>Score raw</td><td>${data.score_raw}</td></tr>
                     <tr><td>Error</td><td><pre>${data.error === null ? 'None' : decodeURIComponent(data.error)}</pre></td></tr>
-                    <tr><td>Dockerfile Content</td><td><pre>${data.dockerfile_content}</pre></td></tr>
+                    <tr><td>Dockerfile Content</td><td><pre><code class="language-dockerfile">${data.dockerfile_content}</code></pre></td></tr>
                     <tr><td>First Name</td><td>${data.firstname}</td></tr>
                     <tr><td>Last Name</td><td>${data.lastname}</td></tr>
                     <tr><td>Email</td><td>${data.email}</td></tr>
@@ -518,6 +527,7 @@
 
                     document.getElementById('dataContent').innerHTML = dataContent;
                     document.getElementById('dataTitle').textContent = `Build ${id}`;
+                    hljs.highlightAll();
                     dialog.showModal();
                     dialog.style.display = 'flex';
                 });
