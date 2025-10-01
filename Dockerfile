@@ -13,7 +13,10 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # Copy the Flask app code and directories
-COPY app.py templates/ challenge/ challenge_cache/ ./
+COPY challenge challenge
+COPY challenge_cache challenge_cache
+COPY templates templates
+COPY app.py ./
 
 # Expose the application port
 EXPOSE 5000
