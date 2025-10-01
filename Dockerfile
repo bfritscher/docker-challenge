@@ -1,5 +1,5 @@
 # Dockerfile for Flask App
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 # Set up working directory
 WORKDIR /app
@@ -8,8 +8,12 @@ WORKDIR /app
 COPY requirements.txt requirements.txt
 RUN pip install -r requirements.txt
 
-# Copy the Flask app code
-COPY . .
+# Copy entrypoint script
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Copy the Flask app code and directories
+COPY app.py templates/ challenge/ challenge_cache/ ./
 
 # Expose the application port
 EXPOSE 5000
@@ -17,5 +21,5 @@ EXPOSE 5000
 # Environment variables for Flask
 ENV FLASK_APP=app.py
 
-# Start the Flask app
-CMD ["flask", "run", "--host=0.0.0.0"]
+# Start the Flask app with entrypoint script
+ENTRYPOINT ["/entrypoint.sh"]

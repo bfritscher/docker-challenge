@@ -4,8 +4,8 @@ services:
     volumes:
       - ./data:/data
       - certs:/certs
-      - ./challenge:/challenge/:ro 
-      - ./challenge_cache:/challenge_cache/:ro 
+      - challenge:/challenge
+      - challenge_cache:/challenge_cache
     environment:
       FLASK_DEBUG: 0
       DOCKER_TLS_CERTDIR: /certs
@@ -15,8 +15,10 @@ services:
     image: docker:dind
     privileged: true
     volumes:
-      - ./challenge:/challenge/:ro 
-      - ./challenge_cache:/challenge_cache/:ro
       - certs:/certs
+      - challenge:/challenge:ro
+      - challenge_cache:/challenge_cache:ro
 volumes:
   certs:
+  challenge:
+  challenge_cache:
