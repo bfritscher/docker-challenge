@@ -164,7 +164,7 @@ class User(db.Model):
 # config admin
 class SecureModelView(ModelView):
     def is_accessible(self):
-        return session.get("user_id") in ADMIN_IDS
+        return is_admin(session.get("user_id"))
 
     # Redirect users who do not have access
     def inaccessible_callback(self, name, **kwargs):
@@ -248,8 +248,7 @@ class Queue:
 
 with app.app_context():
     db.create_all()
-    ADMIN_IDS = [user.id for user in [User.query.filter_by(email=email).first() for email in ADMIN_EMAILS] if user]
-    app.logger.info(f"Admin IDs: {ADMIN_IDS}")
+    app.logger.info(f"Admin emails configured: {ADMIN_EMAILS}")
     # Queuing system for Docker builds
     build_queue = Queue()
     # initialize queue from db get all BuildResults with status queued order by updated_at
@@ -266,6 +265,16 @@ def authentication_required():
     response = jsonify({"error": "Authentication required"})
     response.status_code = 401  # Unauthorized
     return response
+
+
+def is_admin(user_id):
+    """Check if a user is an admin by looking up their email"""
+    if not user_id:
+        return False
+    user = User.query.get(user_id)
+    if not user:
+        return False
+    return user.email in ADMIN_EMAILS
 
 
 def login_required(f):
@@ -427,7 +436,7 @@ def get_build(id):
         "score_raw": build_result.score,
         "updated_at": build_result.updated_at.isoformat(),
     }
-    if build_result.user_id == session["user_id"] or session["user_id"] in ADMIN_IDS:
+    if build_result.user_id == session["user_id"] or is_admin(session.get("user_id")):
         response["dockerfile_content"] = build_result.dockerfile_content
         response["firstname"] = build_result.user.firstname
         response["lastname"] = build_result.user.lastname
