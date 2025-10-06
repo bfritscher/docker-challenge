@@ -58,3 +58,10 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Trigger deployment
+        run: |
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -d '{"folder": "docker-challenge"}' \
+            https://bf0.ch/hooks/deploy-service
