@@ -315,7 +315,6 @@
                     return data;
                 });
         }
-        updateScores();
 
         Dropzone.autoDiscover = false;
         dropzone = new Dropzone("#myDropzone", {
@@ -436,7 +435,9 @@
             layout: "fitColumns", //fit columns to width of table (optional)
             //ajaxURL: "/scores",
             initialSort: [
+                // Tabulator applies the last sorter as the primary sort.
                 { column: "rank", dir: "asc" },
+                { column: "score", dir: "desc" },
             ],
             responsiveLayout: "collapse",
             columns: [ //Define Table Columns
@@ -452,9 +453,9 @@
         "user_id": 
         */
                 //{ formatter: "rownum", hozAlign: "right", width: 40 },
-                { field: "rank", hozAlign: "right", headerHozAlign: "right", width: 40 },
+                { field: "rank", sorter: "number", hozAlign: "right", headerHozAlign: "right", width: 40 },
                 { title: "User", field: "display_name", width: 160, widthShrink: 1 },
-                { title: "Score", field: "score", hozAlign: "right", headerHozAlign: "right", width: 100 },
+                { title: "Score", field: "score", sorter: "number", hozAlign: "right", headerHozAlign: "right", width: 100 },
                 { title: "Size", field: "image_size", hozAlign: "right", headerHozAlign: "right" },
                 { title: "BT", field: "build_time_no_cache", hozAlign: "right", headerHozAlign: "right", width: 80 },
                 { title: "BTc", field: "build_time_with_cache", hozAlign: "right", headerHozAlign: "right", width: 80 },
@@ -481,6 +482,7 @@
                 }
             },
         });
+        table.on("tableBuilt", updateScores);
         table.on("rowClick", function (e, row) {
             getBuild(row.getData().id);
         });

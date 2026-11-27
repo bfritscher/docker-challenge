@@ -1,5 +1,11 @@
 import unittest
 from contextlib import nullcontext
+from http.client import HTTPConnection
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from threading import Thread
+from time import sleep
 from unittest.mock import patch
 
 import docker
@@ -24,12 +30,20 @@ with (
 
 class GradingTest(unittest.TestCase):
     def setUp(self):
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.checkpoint = Path(directory.name) / "regrade.json"
         self.context = grader.app.app_context()
         self.context.push()
         self.addCleanup(grader.db.engine.dispose)
         self.addCleanup(self.context.pop)
         grader.db.create_all()
         self.addCleanup(grader.db.drop_all)
+
+    def regrade(self):
+        return grader.app.test_cli_runner().invoke(
+            args=["regrade", "--checkpoint", str(self.checkpoint)]
+        )
 
     def add_build(self, firstname, lastname, *, valid=True):
         user = grader.User(
@@ -91,7 +105,7 @@ class GradingTest(unittest.TestCase):
             patch.object(grader.client, "ping", return_value=True),
             patch.object(grader, "grading_lock", nullcontext),
         ):
-            result = grader.app.test_cli_runner().invoke(args=["regrade"])
+            result = self.regrade()
 
         self.assertEqual(result.exit_code, 0, result.output or result.exception)
         self.assertEqual([call.args for call in build.call_args_list], [
@@ -108,6 +122,54 @@ class GradingTest(unittest.TestCase):
         self.assertEqual(scores[0]["id"], second_id)
         self.assertEqual(scores[0]["total_attempts"], 2)
 
+    def test_regrade_resumes_after_a_committed_failure_and_interruption(self):
+        first = self.add_build("Alex", "Miller")
+        second = self.add_build("Sam", "Jones")
+        failed = grader.BuildMeasurements(1, 1, 1, False, "Assigned PORT did not respond")
+        passed = grader.BuildMeasurements(1, 1, 1, True, None)
+
+        with (
+            patch.object(grader, "grading_lock", nullcontext),
+            patch.object(
+                grader, "build_and_measure", side_effect=[failed, KeyboardInterrupt(), passed]
+            ) as measure,
+        ):
+            interrupted = self.regrade()
+            self.assertEqual(interrupted.exit_code, 1)
+            self.assertIn(f"Build {first.id} failed", interrupted.output)
+            self.assertTrue(self.checkpoint.is_file())
+
+            resumed = self.regrade()
+            self.assertEqual(resumed.exit_code, 0, resumed.output or resumed.exception)
+            self.assertIn("1 already regraded", resumed.output)
+
+        self.assertEqual([call.args[1] for call in measure.call_args_list], [
+            first.id, second.id, second.id,
+        ])
+        self.assertFalse(first.is_valid)
+        self.assertTrue(second.is_valid)
+        self.assertFalse(self.checkpoint.exists())
+
+    def test_regrade_reports_a_slow_build_before_its_verdict(self):
+        build = self.add_build("Alex", "Miller")
+
+        def fail_build(**_):
+            sleep(0.08)
+            raise docker.errors.BuildError("Docker build failed", [])
+
+        with (
+            patch.object(grader, "grading_lock", nullcontext),
+            patch.object(grader, "GRADING_HEARTBEAT", 0.01),
+            patch.object(grader.client.images, "build", side_effect=fail_build),
+        ):
+            result = self.regrade()
+
+        self.assertEqual(result.exit_code, 0, result.output or result.exception)
+        self.assertIn(f"Regrading build {build.id}", result.output)
+        self.assertIn(f"Build {build.id}: still building without cache", result.output)
+        self.assertIn(f"Build {build.id}: error while building without cache", result.output)
+        self.assertIn(f"Build {build.id} failed", result.output)
+
     def test_regrade_uses_an_admin_edit_made_during_the_build(self):
         build = self.add_build("Alex", "Miller")
         build_id = build.id
@@ -123,7 +185,7 @@ class GradingTest(unittest.TestCase):
             patch.object(grader, "build_and_measure", side_effect=measure) as run,
             patch.object(grader, "grading_lock", nullcontext),
         ):
-            result = grader.app.test_cli_runner().invoke(args=["regrade"])
+            result = self.regrade()
 
         self.assertEqual(result.exit_code, 0, result.output or result.exception)
         self.assertEqual(
@@ -167,3 +229,38 @@ class GradingTest(unittest.TestCase):
         self.assertEqual(saved.status_code, 302)
         grader.db.session.refresh(build)
         self.assertEqual(build.error, "Edited in admin")
+
+
+class GuestbookProbeTest(unittest.TestCase):
+    def test_a_slow_stream_cannot_keep_a_probe_open(self):
+        class SlowResponse(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", "20")
+                self.end_headers()
+                try:
+                    for _ in range(20):
+                        self.wfile.write(b"x")
+                        sleep(0.04)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+            def log_message(self, *_):
+                pass
+
+        with HTTPServer(("127.0.0.1", 0), SlowResponse) as server:
+            thread = Thread(target=server.handle_request, daemon=True)
+            thread.start()
+            try:
+                with (
+                    patch.object(grader, "PROBE_TIMEOUT", 0.2),
+                    patch.object(
+                        grader, "HTTPConnection",
+                        side_effect=lambda _, port, timeout: HTTPConnection("127.0.0.1", port, timeout=timeout),
+                    ),
+                    self.assertRaisesRegex(TimeoutError, "Guestbook HTTP probe timed out"),
+                ):
+                    grader.guestbook_request(server.server_port, "GET", "/", 200)
+            finally:
+                thread.join(timeout=2)
