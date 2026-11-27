@@ -1,3 +1,5 @@
+import os
+
 from flask import abort, request, send_from_directory
 import flask
 import gbmodel
@@ -37,5 +39,5 @@ def entry():
     return abort(403)
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', debug=True)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', '5000')))
 # cache test

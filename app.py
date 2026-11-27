@@ -1,6 +1,17 @@
 import docker
 import docker.api.build
+from collections import Counter
+from contextlib import closing, contextmanager
 from functools import wraps
+from html.parser import HTMLParser
+from http.client import HTTPConnection, HTTPException
+from io import BytesIO
+from pathlib import Path, PurePosixPath
+from random import SystemRandom
+from tarfile import TarError, open as open_tar
+from typing import NamedTuple
+from urllib.parse import urljoin, urlsplit
+from uuid import uuid4
 
 docker.api.build.process_dockerfile = lambda dockerfile, path: (
     "Dockerfile",
@@ -10,6 +21,7 @@ import urllib3
 
 urllib3.disable_warnings()
 
+import click
 import jwt
 
 from flask import (
@@ -29,13 +41,14 @@ from sqlalchemy import func, desc, asc
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.sql.expression import over
 import time
-import requests
 import json
+import posixpath
 from threading import Thread, Condition
 from datetime import datetime, timezone
 import os
 from flask_admin import Admin
 from flask_admin.contrib.sqla import ModelView
+from flask_admin.theme import Bootstrap4Theme
 from markupsafe import Markup
 
 JWT_SECRET = os.getenv("JWT_SECRET")
@@ -45,6 +58,9 @@ ADMIN_EMAILS = os.getenv("ADMIN_EMAILS", "").split(",")
 BUILD_STATUS_QUEUED = "queued"
 BUILD_STATUS_COMPLETED = "completed"
 BUILD_STATUS_CANCELED = "canceled"
+CHALLENGE_PATH = Path("/challenge")
+WARM_CHALLENGE_PATH = Path("/challenge_cache")
+MAX_PROBE_BODY = 2 * 1024 * 1024
 
 app = Flask(__name__)
 app.secret_key = SESSION_SECRET
@@ -55,8 +71,7 @@ tls_config = docker.tls.TLSConfig(
 )
 client = docker.DockerClient(base_url="tcp://dind:2376", tls=tls_config)
 
-app.config['FLASK_ADMIN_SWATCH'] = 'yeti'
-admin = Admin(app, template_mode='bootstrap4')
+admin = Admin(app, theme=Bootstrap4Theme(swatch="yeti"))
 
 # Configure Database URI: Adjust as needed
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:////data/results.db"
@@ -71,7 +86,6 @@ def get_queue_order_message(queue):
 def buildresult_to_queue_item(build_result):
     return {
         "user_id": build_result.user_id,
-        "dockerfile_content": build_result.dockerfile_content,
         "id": build_result.id,
     }
 
@@ -188,14 +202,18 @@ class BuildResultAdmin(SecureModelView):
     def user_link_formatter(view, context, model, name):
         if model.user is None:
             return ''
-        return Markup(f'<a href="{url_for("user.edit_view", id=model.user.id)}">{model.user.firstname} {model.user.lastname}</a>')
+        return Markup('<a href="{}">{} {}</a>').format(
+            url_for("user.edit_view", id=model.user.id),
+            model.user.firstname,
+            model.user.lastname,
+        )
 
     column_formatters = {
         'user': user_link_formatter
     }
 
-admin.add_view(UserAdmin(User, db.session))
-admin.add_view(BuildResultAdmin(BuildResult, db.session))
+admin.add_view(UserAdmin(User, db))
+admin.add_view(BuildResultAdmin(BuildResult, db))
 
 
 class Queue:
@@ -271,7 +289,7 @@ def is_admin(user_id):
     """Check if a user is an admin by looking up their email"""
     if not user_id:
         return False
-    user = User.query.get(user_id)
+    user = db.session.get(User, user_id)
     if not user:
         return False
     return user.email in ADMIN_EMAILS
@@ -295,6 +313,83 @@ def cancel_item(id):
         current_app.logger.info(f"Build {id} canceled")
 
 
+@contextmanager
+def grading_lock():
+    from fcntl import LOCK_EX, flock
+
+    # Share the build daemon and its cache with the web worker one grader at a time.
+    with open("/data/grading.lock", "a") as lock:
+        flock(lock, LOCK_EX)
+        yield
+
+
+class BuildMeasurements(NamedTuple):
+    build_time_no_cache: float | None
+    build_time_with_cache: float | None
+    image_size: int | None
+    is_valid: bool
+    error: str | None
+
+
+def save_build_result(build_id, dockerfile, measurements, *, previous_status):
+    values = {**measurements._asdict(), "build_status": BUILD_STATUS_COMPLETED}
+    if previous_status == BUILD_STATUS_COMPLETED:
+        # Keep the original tie-break timestamp during a regrade.
+        values["updated_at"] = BuildResult.updated_at
+    result = db.session.execute(
+        db.update(BuildResult)
+        .where(
+            BuildResult.id == build_id,
+            BuildResult.build_status == previous_status,
+            BuildResult.dockerfile_content == dockerfile,
+        )
+        .values(values)
+        .execution_options(synchronize_session=False)
+    )
+    db.session.commit()
+    return result.rowcount == 1
+
+
+def grade_build(build_id, previous_status):
+    while True:
+        dockerfile = db.session.scalar(
+            db.select(BuildResult.dockerfile_content).where(
+                BuildResult.id == build_id, BuildResult.build_status == previous_status
+            )
+        )
+        if dockerfile is None:
+            return None
+        measurements = build_and_measure(dockerfile, build_id)
+        if previous_status == BUILD_STATUS_COMPLETED and not measurements.is_valid:
+            # A lost daemon must not turn all remaining attempts into failures.
+            client.ping()
+        if save_build_result(build_id, dockerfile, measurements, previous_status=previous_status):
+            return measurements
+        # An admin may have edited the Dockerfile or removed the attempt during grading.
+
+
+@app.cli.command("regrade")
+def regrade_completed_builds():
+    """Rebuild and revalidate every completed submission in the stored results."""
+    with grading_lock():
+        client.ping()
+        completed_ids = db.session.scalars(
+            db.select(BuildResult.id)
+            .where(BuildResult.build_status == BUILD_STATUS_COMPLETED)
+            .order_by(BuildResult.id)
+        ).all()
+        regraded = 0
+        for build_id in completed_ids:
+            measurements = grade_build(build_id, BUILD_STATUS_COMPLETED)
+            if measurements is None:
+                click.echo(f"Build {build_id} skipped")
+                continue
+            regraded += 1
+            verdict = "passed" if measurements.is_valid else "failed"
+            click.echo(f"Build {build_id} {verdict}")
+        click.echo(f"Regraded {regraded} completed attempts.")
+
+
 def process_build_queue():
     while True:
         with app.app_context():
@@ -302,26 +397,18 @@ def process_build_queue():
             if build_data is None:
                 break
 
-            dockerfile_content = build_data["dockerfile_content"]
-
-            build_time_no_cache, build_time_with_cache, image_size, is_valid, error = (
-                build_and_measure(dockerfile_content, build_data["id"])
-            )
-
-            # Update the database with the build results
-            build_result = BuildResult.query.get(build_data["id"])
-            build_result.build_time_no_cache = build_time_no_cache
-            build_result.build_time_with_cache = build_time_with_cache
-            build_result.image_size = image_size
-            build_result.is_valid = is_valid
-            build_result.build_status = BUILD_STATUS_COMPLETED
-            build_result.error = error
-            db.session.commit()
-            current_app.logger.info(f"Build {build_data['id']} completed")
+            build_id = build_data["id"]
+            with grading_lock():
+                if grade_build(build_id, BUILD_STATUS_QUEUED) is None:
+                    continue
+                build_result = db.session.get(BuildResult, build_id)
+                if build_result is None:
+                    continue
+            current_app.logger.info(f"Build {build_id} completed")
             build_queue.send_message({
                 "message": "Build completed",
-                 "id": build_data["id"],
-                 "is_valid": is_valid,
+                 "id": build_id,
+                 "is_valid": build_result.is_valid,
                  "score": round(build_result.score * 1000) if build_result.score else None,
                  "updated_at": build_result.updated_at.isoformat(),
                  "user_id": build_result.user_id,
@@ -495,7 +582,18 @@ def size_to_mb(image_size):
     return f"{image_size_mb} MB"
 
 
+def remove_build_image(image, build_id):
+    try:
+        image.remove(force=True)
+    except docker.errors.NotFound:
+        pass
+    except (docker.errors.DockerException, OSError):
+        current_app.logger.exception("Could not remove an image for build %s", build_id)
+
+
 def build_and_measure(dockerfile_content, id):
+    build_time_no_cache = build_time_with_cache = image_size = None
+    img1 = img2 = None
     try:
         tag = f"build-{id}"
         current_app.logger.info(f"Building and measuring Dockerfile with tag {tag}")
@@ -503,7 +601,7 @@ def build_and_measure(dockerfile_content, id):
         # First build without cache
         start_time = time.time()
         img1, logs = client.images.build(
-            path="/challenge", dockerfile=dockerfile_content, tag=tag, nocache=True
+            path=str(CHALLENGE_PATH), dockerfile=dockerfile_content, tag=tag, nocache=True
         )
         end_time = time.time()
         build_time_no_cache = end_time - start_time
@@ -524,14 +622,12 @@ def build_and_measure(dockerfile_content, id):
             {"message": f"Image size: {size_to_mb(image_size)}", "id": id}
         )
 
-        try:
-            img1.remove(force=True)
-        except Exception as e:
-            pass
+        remove_build_image(img1, id)
+        img1 = None
         # Second build with cache
         start_time = time.time()
         img2, logs = client.images.build(
-            path="/challenge_cache", dockerfile=dockerfile_content, tag=tag
+            path=str(WARM_CHALLENGE_PATH), dockerfile=dockerfile_content, tag=tag
         )
         end_time = time.time()
         build_time_with_cache = end_time - start_time
@@ -547,55 +643,184 @@ def build_and_measure(dockerfile_content, id):
         time.sleep(0.5)
 
         is_valid, error = validate_container(id, img2)
-        img2.remove(force=True)
         current_app.logger.info(f"Container is valid: {is_valid}")
         build_queue.send_message(
             {"message": f"Container is valid: {is_valid}", "id": id}
         )
 
-        return build_time_no_cache, build_time_with_cache, image_size, is_valid, error
+        return BuildMeasurements(build_time_no_cache, build_time_with_cache, image_size, is_valid, error)
 
     except Exception as e:
         current_app.logger.info(e)
-        return None, None, None, False, str(e)
+        return BuildMeasurements(build_time_no_cache, build_time_with_cache, image_size, False, str(e))
+    finally:
+        for image in (img2, img1):
+            if image is not None:
+                remove_build_image(image, id)
+
+
+class ValidationError(Exception):
+    pass
+
+
+class GuestbookPage(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.has_mount = False
+        self.module_scripts = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "div" and attrs.get("id") == "app":
+            self.has_mount = True
+        if tag == "script" and attrs.get("type") == "module" and attrs.get("src"):
+            self.module_scripts.append(attrs["src"])
+
+
+def verify_supplied_app(container, working_dir, expected_source):
+    file_path = PurePosixPath(working_dir or "/") / "app.py"
+    for _ in range(8):
+        try:
+            archive, stat = container.get_archive(str(file_path))
+        except docker.errors.NotFound as error:
+            raise ValidationError("app.py is missing from the image's WORKDIR") from error
+
+        with closing(archive):
+            if stat.get("linkTarget"):
+                target = file_path.parent / stat["linkTarget"]
+                file_path = PurePosixPath(posixpath.normpath(str(target)))
+                continue
+            if stat["size"] != len(expected_source):
+                raise ValidationError("app.py must match the supplied Guestbook file")
+            data = bytearray()
+            for chunk in archive:
+                data.extend(chunk)
+                if len(data) > len(expected_source) + 64 * 1024:
+                    raise ValidationError("app.py must match the supplied Guestbook file")
+            break
+    else:
+        raise ValidationError("Could not resolve app.py from the image's WORKDIR")
+
+    try:
+        with open_tar(fileobj=BytesIO(data), mode="r:") as tar:
+            member = tar.next()
+            if member and member.name == file_path.name and member.isfile():
+                if member.size == len(expected_source) and tar.extractfile(member).read() == expected_source:
+                    return
+    except TarError as error:
+        raise ValidationError("Could not read app.py from the image") from error
+    raise ValidationError("app.py must match the supplied Guestbook file")
+
+
+def guestbook_request(port, method, path, status, body=None):
+    headers = {"Content-Type": "application/json"} if body is not None else {}
+    with closing(HTTPConnection("dind", port, timeout=2)) as connection:
+        connection.request(method, path, body=body, headers=headers)
+        with connection.getresponse() as response:
+            if response.status != status:
+                target = path if path in ("/", "/entry", "/entries") else "Guestbook JavaScript"
+                raise ValidationError(
+                    f"{method} {target} returned HTTP {response.status}, expected {status}"
+                )
+            content = response.read(MAX_PROBE_BODY + 1)
+            if len(content) > MAX_PROBE_BODY:
+                raise ValidationError("Guestbook response exceeded the size limit")
+            return response.headers.get_content_type(), content
+
+
+def check_guestbook(port):
+    startup_deadline = time.monotonic() + 15
+    while True:
+        try:
+            content_type, homepage = guestbook_request(port, "GET", "/", 200)
+            break
+        except (ConnectionError, TimeoutError) as error:
+            if time.monotonic() >= startup_deadline:
+                raise ValidationError("Guestbook did not respond on the assigned PORT") from error
+            time.sleep(0.25)
+
+    if content_type != "text/html":
+        raise ValidationError("Guestbook homepage must be served as HTML")
+    page = GuestbookPage()
+    page.feed(homepage.decode("utf-8", errors="replace"))
+    page.close()
+    if not page.has_mount or not page.module_scripts:
+        raise ValidationError("Homepage did not include the Guestbook frontend")
+    if len(page.module_scripts) > 8:
+        raise ValidationError("Guestbook homepage included too many JavaScript modules")
+
+    for script in page.module_scripts:
+        asset = urlsplit(urljoin("/", script))
+        if asset.scheme or asset.netloc or not asset.path.startswith("/"):
+            raise ValidationError("Guestbook JavaScript must be served by the container")
+        asset_path = asset.path + (f"?{asset.query}" if asset.query else "")
+        content_type, javascript = guestbook_request(port, "GET", asset_path, 200)
+        if not javascript.strip() or content_type not in (
+            "text/javascript", "application/javascript", "text/ecmascript", "application/ecmascript",
+        ):
+            raise ValidationError("Guestbook JavaScript did not load")
+
+    entry = {
+        "name": "Guestbook validator",
+        "email": "validator@example.invalid",
+        "message": uuid4().hex,
+    }
+    guestbook_request(port, "POST", "/entry", 204, body=json.dumps(entry))
+    _, body = guestbook_request(port, "GET", "/entries", 200)
+    try:
+        entries = json.loads(body)
+    except (ValueError, RecursionError) as error:
+        raise ValidationError("Guestbook entries were not valid JSON") from error
+    if not isinstance(entries, list) or not any(
+        isinstance(saved, dict) and all(saved.get(key) == value for key, value in entry.items())
+        for saved in entries
+    ):
+        raise ValidationError("Guestbook entries did not include the newly submitted entry")
 
 
 def validate_container(id, image):
-    is_valid = False
-    error = None
-    tag = f"build-{id}"
-    container = None
-    try:
-        current_app.logger.info(f"Starting container with tag {tag}")
-        build_queue.send_message({"message": f"Starting container", "id": id})
-        container = client.containers.run(
-            image=image,
-            detach=True,
-            security_opt=["no-new-privileges"],
-            cpu_shares=512,
-            mem_limit="512m",
-            environment={"PORT": "8000"},
-            ports={"8000/tcp": 8000},
-            name=tag,
-        )
-        time.sleep(5)
-        current_app.logger.info(f"Validating container with tag {tag}")
-        build_queue.send_message({"message": f"Validating container", "id": id})
-        response = requests.get("http://dind:8000")
-        is_valid = (
-            response.status_code == 200 and '<div id="app"></div>' in response.text
-        )
-        if not is_valid:
-            error = response.status_code
-    except requests.exceptions.ConnectionError:
-        error = "Connection error on port 8000"
-    except Exception as e:
-        error = "Error starting container"
-    finally:
-        time.sleep(1)
-        if container:
-            container.remove(v=True, force=True)
-        return is_valid, error
+    ports = SystemRandom().sample(range(10000, 65000), 3)
+    expected_source = (WARM_CHALLENGE_PATH / "app.py").read_bytes()
+    runs = (
+        ("Normal startup (first port)", ports[0], {}),
+        ("Normal startup (second port)", ports[1], {}),
+        ("Direct python app.py startup", ports[2], {"entrypoint": ["python"], "command": ["app.py"]}),
+    )
+    for label, port, startup in runs:
+        container = None
+        try:
+            build_queue.send_message({"message": f"Validating {label.lower()}", "id": id})
+            container_port = f"{port}/tcp"
+            container = client.containers.create(
+                image=image,
+                security_opt=["no-new-privileges"],
+                cpu_shares=512,
+                mem_limit="512m",
+                environment={"PORT": str(port)},
+                ports={container_port: None},
+                **startup,
+            )
+            if startup:
+                verify_supplied_app(container, image.attrs["Config"].get("WorkingDir"), expected_source)
+            container.start()
+            container.reload()
+            host_port = int(container.ports[container_port][0]["HostPort"])
+            check_guestbook(host_port)
+        except ValidationError as error:
+            return False, f"{label}: {error}"
+        except (docker.errors.APIError, HTTPException, OSError, ValueError, KeyError, TypeError, IndexError):
+            current_app.logger.exception("Build %s failed during %s", id, label)
+            return False, f"{label}: could not start or contact the Guestbook container"
+        finally:
+            if container is not None:
+                try:
+                    container.remove(v=True, force=True)
+                except docker.errors.NotFound:
+                    pass
+                except (docker.errors.DockerException, OSError):
+                    current_app.logger.exception("Could not remove a container for build %s", id)
+
+    return True, None
 
 
 @app.route("/scores", methods=["GET"])
@@ -658,6 +883,7 @@ def get_scores():
             BuildResult.id,
             BuildResult.user_id,
             User.firstname,
+            User.lastname,
             BuildResult.build_time_no_cache,
             BuildResult.build_time_with_cache,
             BuildResult.image_size,
@@ -682,11 +908,13 @@ def get_scores():
         .all()
     )
 
+    first_name_counts = Counter(row.firstname.strip().casefold() for row in best_results)
     scores = []
     for (
         id,
         user_id,
         firstname,
+        lastname,
         build_time_no_cache,
         build_time_with_cache,
         image_size,
@@ -696,11 +924,16 @@ def get_scores():
         total_attempts,
         rank
     ) in best_results:
+        display_name = firstname.strip()
+        initial = lastname.strip()[:1]
+        if first_name_counts[display_name.casefold()] > 1 and initial:
+            display_name = f"{display_name} {initial}."
         scores.append(
             {
                 "id": id,
                 "user_id": user_id,
                 "firstname": firstname,
+                "display_name": display_name,
                 "build_time_no_cache": round(build_time_no_cache, 1),
                 "build_time_with_cache": round(build_time_with_cache, 1),
                 "image_size": size_to_mb(image_size),
@@ -715,8 +948,6 @@ def get_scores():
     return jsonify(scores)
 
 
-# Start a thread to process the build queue
-Thread(target=process_build_queue, daemon=True).start()
-
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0")
+    Thread(target=process_build_queue, daemon=True).start()
+    app.run(host="0.0.0.0", use_reloader=False)

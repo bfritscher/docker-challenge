@@ -238,6 +238,11 @@
             <div id="topRight"></div>
         </header>
         <div id="messages"></div>
+        <p class="only-auth">
+            Package the supplied Guestbook app with its built frontend. The image must serve it
+            on the port set by <code>PORT</code> and support <code>python app.py</code> from its
+            configured <code>WORKDIR</code>.
+        </p>
         <div id="myDropzone" class="dropzone only-auth"></div>
         <div id="scores"></div>
     </div>
@@ -448,7 +453,7 @@
         */
                 //{ formatter: "rownum", hozAlign: "right", width: 40 },
                 { field: "rank", hozAlign: "right", headerHozAlign: "right", width: 40 },
-                { title: "User", field: "firstname", width: 160, widthShrink: 1 },
+                { title: "User", field: "display_name", width: 160, widthShrink: 1 },
                 { title: "Score", field: "score", hozAlign: "right", headerHozAlign: "right", width: 100 },
                 { title: "Size", field: "image_size", hozAlign: "right", headerHozAlign: "right" },
                 { title: "BT", field: "build_time_no_cache", hozAlign: "right", headerHozAlign: "right", width: 80 },
