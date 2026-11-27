@@ -241,7 +241,7 @@
         <p class="only-auth">
             Package the supplied Guestbook app with its built frontend. The image must serve it
             on the port set by <code>PORT</code> and support <code>python app.py</code> from its
-            configured <code>WORKDIR</code>.
+            configured <code>WORKDIR</code>. Each build must finish within {{ build_time_limit }} seconds.
         </p>
         <div id="myDropzone" class="dropzone only-auth"></div>
         <div id="scores"></div>

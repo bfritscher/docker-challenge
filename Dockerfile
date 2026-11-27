@@ -16,7 +16,7 @@ RUN chmod +x /entrypoint.sh
 COPY challenge challenge
 COPY challenge_cache challenge_cache
 COPY templates templates
-COPY app.py ./
+COPY app.py build_worker.py ./
 
 # Expose the application port
 EXPOSE 5000

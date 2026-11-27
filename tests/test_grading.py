@@ -1,4 +1,5 @@
 import unittest
+from subprocess import CompletedProcess, TimeoutExpired
 from contextlib import nullcontext
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -153,22 +154,46 @@ class GradingTest(unittest.TestCase):
     def test_regrade_reports_a_slow_build_before_its_verdict(self):
         build = self.add_build("Alex", "Miller")
 
-        def fail_build(**_):
+        def fail_build(*_, **options):
             sleep(0.08)
-            raise docker.errors.BuildError("Docker build failed", [])
+            raise TimeoutExpired("build worker", options["timeout"])
 
         with (
             patch.object(grader, "grading_lock", nullcontext),
             patch.object(grader, "GRADING_HEARTBEAT", 0.01),
-            patch.object(grader.client.images, "build", side_effect=fail_build),
+            patch.object(grader.subprocess, "run", side_effect=fail_build),
         ):
             result = self.regrade()
 
         self.assertEqual(result.exit_code, 0, result.output or result.exception)
         self.assertIn(f"Regrading build {build.id}", result.output)
         self.assertIn(f"Build {build.id}: still building without cache", result.output)
-        self.assertIn(f"Build {build.id}: error while building without cache", result.output)
+        self.assertIn("exceeded the 200-second limit while building without cache", result.output)
         self.assertIn(f"Build {build.id} failed", result.output)
+        self.assertFalse(build.is_valid)
+        self.assertIsNone(build.build_time_with_cache)
+
+    def test_warm_build_has_its_own_deadline_and_preserves_cold_measurements(self):
+        build = self.add_build("Alex", "Miller")
+        with (
+            patch.object(grader, "grading_lock", nullcontext),
+            patch.object(grader.client.images.get.return_value, "attrs", {"Size": 42}),
+            patch.object(
+                grader.subprocess, "run",
+                side_effect=[CompletedProcess([], 0), TimeoutExpired("build worker", 200)],
+            ) as run,
+            patch.object(grader, "validate_container") as validate,
+        ):
+            result = self.regrade()
+
+        self.assertEqual(result.exit_code, 0, result.output or result.exception)
+        self.assertEqual([call.kwargs["timeout"] for call in run.call_args_list], [200, 200])
+        self.assertFalse(build.is_valid)
+        self.assertEqual(build.image_size, 42)
+        self.assertIsNotNone(build.build_time_no_cache)
+        self.assertIsNone(build.build_time_with_cache)
+        self.assertIn("exceeded the 200-second limit while building with cache", build.error)
+        validate.assert_not_called()
 
     def test_regrade_uses_an_admin_edit_made_during_the_build(self):
         build = self.add_build("Alex", "Miller")

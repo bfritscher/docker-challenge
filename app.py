@@ -1,5 +1,4 @@
 import docker
-import docker.api.build
 from collections import Counter
 from contextlib import closing, contextmanager, suppress
 from functools import wraps
@@ -9,16 +8,14 @@ from io import BytesIO
 from pathlib import Path, PurePosixPath
 from random import SystemRandom
 from socket import SHUT_RDWR
+import subprocess
+import sys
 from tarfile import TarError, open as open_tar
 from tempfile import NamedTemporaryFile
 from typing import NamedTuple
 from urllib.parse import urljoin, urlsplit
 from uuid import uuid4
 
-docker.api.build.process_dockerfile = lambda dockerfile, path: (
-    "Dockerfile",
-    dockerfile,
-)
 import urllib3
 
 urllib3.disable_warnings()
@@ -53,6 +50,7 @@ from flask_admin import Admin
 from flask_admin.contrib.sqla import ModelView
 from flask_admin.theme import Bootstrap4Theme
 from markupsafe import Markup
+from build_worker import create_docker_client
 
 JWT_SECRET = os.getenv("JWT_SECRET")
 SESSION_SECRET = os.getenv("SESSION_SECRET")
@@ -67,15 +65,11 @@ MAX_PROBE_BODY = 2 * 1024 * 1024
 PROBE_TIMEOUT = 2
 STARTUP_TIMEOUT = 15
 GRADING_HEARTBEAT = 15
+BUILD_TIME_LIMIT = 200
 
 app = Flask(__name__)
 app.secret_key = SESSION_SECRET
-tls_config = docker.tls.TLSConfig(
-    client_cert=("/certs/client/cert.pem", "/certs/client/key.pem"),
-    ca_cert="/certs/client/ca.pem",
-    verify=False,
-)
-client = docker.DockerClient(base_url="tcp://dind:2376", tls=tls_config)
+client = create_docker_client()
 
 admin = Admin(app, theme=Bootstrap4Theme(swatch="yeti"))
 
@@ -510,6 +504,7 @@ def index():
         last_build=last_build,
         queue=[item["id"] for item in build_queue.queue],
         queued_item_id=queued_item_id,
+        build_time_limit=BUILD_TIME_LIMIT,
     )
 
 
@@ -670,22 +665,39 @@ def report_build_phase(build_id, phase):
         finished.set()
 
 
+def build_image(context, dockerfile, tag, *, nocache=False):
+    # Killing the dedicated client closes the build request so Docker cancels it.
+    worker = Path(__file__).with_name("build_worker.py")
+    result = subprocess.run(
+        [sys.executable, str(worker), str(context), tag, "no-cache" if nocache else "cache"],
+        input=dockerfile.encode("utf-8"),
+        capture_output=True,
+        timeout=BUILD_TIME_LIMIT,
+    )
+    if result.returncode:
+        raise docker.errors.BuildError(
+            result.stderr.decode("utf-8", errors="replace").strip()
+            or f"Docker build worker exited with code {result.returncode}",
+            [],
+        )
+    return client.images.get(tag)
+
+
 def build_and_measure(dockerfile_content, id):
     build_time_no_cache = build_time_with_cache = image_size = None
     img1 = img2 = None
     phase = "building without cache"
     try:
-        tag = f"build-{id}"
+        tag = f"build-{id}-{uuid4().hex}"
         current_app.logger.info(f"Building and measuring Dockerfile with tag {tag}")
         build_queue.send_message({"message": f"Build started", "id": id})
         # First build without cache
-        start_time = time.time()
+        start_time = time.monotonic()
         with report_build_phase(id, phase):
-            img1, _ = client.images.build(
-                path=str(CHALLENGE_PATH), dockerfile=dockerfile_content, tag=tag, nocache=True
+            img1 = build_image(
+                CHALLENGE_PATH, dockerfile_content, tag, nocache=True
             )
-        end_time = time.time()
-        build_time_no_cache = end_time - start_time
+        build_time_no_cache = time.monotonic() - start_time
         current_app.logger.info(
             "Build %s: build without cache completed in %.1fs", id, build_time_no_cache
         )
@@ -707,13 +719,12 @@ def build_and_measure(dockerfile_content, id):
         img1 = None
         # Second build with cache
         phase = "building with cache"
-        start_time = time.time()
+        start_time = time.monotonic()
         with report_build_phase(id, phase):
-            img2, _ = client.images.build(
-                path=str(WARM_CHALLENGE_PATH), dockerfile=dockerfile_content, tag=tag
+            img2 = build_image(
+                WARM_CHALLENGE_PATH, dockerfile_content, tag
             )
-        end_time = time.time()
-        build_time_with_cache = end_time - start_time
+        build_time_with_cache = time.monotonic() - start_time
         current_app.logger.info(
             "Build %s: build with cache completed in %.1fs", id, build_time_with_cache
         )
@@ -736,6 +747,17 @@ def build_and_measure(dockerfile_content, id):
 
         return BuildMeasurements(build_time_no_cache, build_time_with_cache, image_size, is_valid, error)
 
+    except subprocess.TimeoutExpired:
+        error = f"Docker build exceeded the {BUILD_TIME_LIMIT}-second limit while {phase}"
+        current_app.logger.warning("Build %s: %s", id, error)
+        build_queue.send_message({"message": error, "id": id})
+        try:
+            client.images.remove(tag, force=True)
+        except docker.errors.NotFound:
+            pass
+        except (docker.errors.DockerException, OSError):
+            current_app.logger.exception("Could not remove the timed-out image for build %s", id)
+        return BuildMeasurements(build_time_no_cache, build_time_with_cache, image_size, False, error)
     except Exception as e:
         current_app.logger.warning("Build %s: error while %s (%s)", id, phase, type(e).__name__)
         return BuildMeasurements(build_time_no_cache, build_time_with_cache, image_size, False, str(e))
