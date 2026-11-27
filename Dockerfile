@@ -1,5 +1,5 @@
 # Dockerfile for Flask App
-FROM python:3.13-slim
+FROM python:3.14-slim
 
 # Set up working directory
 WORKDIR /app
